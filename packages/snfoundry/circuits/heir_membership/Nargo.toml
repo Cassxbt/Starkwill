@@ -1,0 +1,6 @@
+[package]
+name = "heir_membership"
+type = "bin"
+authors = ["StarkWill"]
+
+[dependencies]

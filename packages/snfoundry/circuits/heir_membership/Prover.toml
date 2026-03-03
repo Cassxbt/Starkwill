@@ -1,0 +1,6 @@
+secret = "12345"
+path_indices = ["0", "0", "0", "0", "0", "0", "0", "0"]
+path_siblings = ["0", "0", "0", "0", "0", "0", "0", "0"]
+merkle_root = "0x9c1576b7e12a456dc7dd101cbc1eeff165523b1860c042379912bb451d1ae7"
+nullifier_hash = "0xc79e5c602eff3c862cc0f65d04cc7bf8d6bf5b073437a779c524c2056764bd"
+vault_address = "42"
