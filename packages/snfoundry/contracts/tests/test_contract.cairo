@@ -128,3 +128,73 @@ fn test_nullifier_initially_unused() {
     let (_addr, dispatcher) = deploy_vault();
     assert(!dispatcher.is_nullifier_used(0xdead), 'Should be unused');
 }
+
+#[test]
+fn test_not_claimable_before_timeout() {
+    let (addr, dispatcher) = deploy_vault();
+
+    // Advance to exactly checkin + grace (not past it)
+    let boundary_ts = CHECKIN_PERIOD + GRACE_PERIOD;
+    cheat_block_timestamp(addr, boundary_ts, CheatSpan::Indefinite);
+
+    assert(!dispatcher.is_claimable(), 'Should NOT be claimable yet');
+}
+
+#[test]
+#[should_panic(expected: 'ONLY_GUARDIAN')]
+fn test_non_guardian_cannot_approve() {
+    let (addr, dispatcher) = deploy_vault();
+    cheat_caller_address(addr, HEIR_1(), CheatSpan::TargetCalls(1));
+    dispatcher.guardian_approve_unlock();
+}
+
+#[test]
+fn test_check_in_resets_timer() {
+    let (addr, dispatcher) = deploy_vault();
+
+    // Advance to midway through the checkin period
+    let mid_ts = CHECKIN_PERIOD / 2;
+    cheat_block_timestamp(addr, mid_ts, CheatSpan::Indefinite);
+
+    // Owner checks in — this resets the timer to `mid_ts`
+    cheat_caller_address(addr, OWNER(), CheatSpan::TargetCalls(1));
+    dispatcher.check_in();
+
+    // Advance by checkin + grace from the original deploy time
+    // This would have been claimable WITHOUT the reset
+    let would_be_claimable = CHECKIN_PERIOD + GRACE_PERIOD + 1;
+    cheat_block_timestamp(addr, would_be_claimable, CheatSpan::Indefinite);
+
+    // But because we checked in at mid_ts, deadline is now mid_ts + period + grace
+    // which is greater than would_be_claimable
+    assert(!dispatcher.is_claimable(), 'Timer should have reset');
+}
+
+#[test]
+fn test_guardian_double_approve_idempotent() {
+    let (addr, dispatcher) = deploy_vault();
+
+    // Guardian 1 approves twice
+    cheat_caller_address(addr, GUARDIAN_1(), CheatSpan::TargetCalls(1));
+    dispatcher.guardian_approve_unlock();
+    cheat_caller_address(addr, GUARDIAN_1(), CheatSpan::TargetCalls(1));
+    dispatcher.guardian_approve_unlock();
+
+    // Should still need another guardian — double approve doesn't count twice
+    assert(!dispatcher.is_claimable(), 'Double approve shouldnt unlock');
+}
+
+#[test]
+#[should_panic(expected: 'CANCEL_WINDOW_OVER')]
+fn test_recover_after_cancel_window() {
+    let (addr, dispatcher) = deploy_vault();
+
+    // Advance past the cancel window
+    cheat_block_timestamp(addr, CANCEL_UNTIL + 1, CheatSpan::Indefinite);
+
+    // Owner tries to recover — should fail
+    cheat_caller_address(addr, OWNER(), CheatSpan::TargetCalls(1));
+    let token: ContractAddress = 'token'.try_into().unwrap();
+    let to: ContractAddress = 'receiver'.try_into().unwrap();
+    dispatcher.recover(token, to, 100_u256);
+}
