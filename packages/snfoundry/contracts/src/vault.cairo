@@ -23,7 +23,7 @@ pub trait IVault<TContractState> {
         ref self: TContractState, full_proof_with_hints: Span<felt252>, token: ContractAddress,
     );
     fn set_verifier_address(ref self: TContractState, verifier: ContractAddress);
-    fn set_heir_merkle_root(ref self: TContractState, root: felt252, heir_share_count: u32);
+    fn set_heir_merkle_root(ref self: TContractState, root: felt252);
     fn is_claimable(self: @TContractState) -> bool;
     fn get_heir_merkle_root(self: @TContractState) -> felt252;
     fn get_verifier_address(self: @TContractState) -> ContractAddress;
@@ -64,7 +64,6 @@ mod vault {
 
         verifier_address: ContractAddress,
         heir_merkle_root: felt252,
-        heir_share_count: u32,
         nullifiers_used: Map<felt252, bool>,
     }
 
@@ -137,6 +136,7 @@ mod vault {
         nullifier_hash: felt252,
         token: ContractAddress,
         amount: u256,
+        weight_bps: u256,
     }
 
     #[abi(embed_v0)]
@@ -213,13 +213,14 @@ mod vault {
             let public_inputs: Span<u256> = result.expect('ZK_PROOF_INVALID');
 
             // Public inputs order from our Noir circuit:
-            // [0] = merkle_root, [1] = nullifier_hash, [2] = vault_address
+            // [0] = merkle_root, [1] = nullifier_hash, [2] = vault_address, [3] = weight_bps_pub
             let pi_len = SpanTrait::len(public_inputs);
-            assert(pi_len >= 3, 'BAD_PUBLIC_INPUTS');
+            assert(pi_len >= 4, 'BAD_PUBLIC_INPUTS');
 
             let pi_root: u256 = *SpanTrait::at(public_inputs, 0);
             let pi_nullifier: u256 = *SpanTrait::at(public_inputs, 1);
             let pi_vault: u256 = *SpanTrait::at(public_inputs, 2);
+            let pi_weight: u256 = *SpanTrait::at(public_inputs, 3);
 
             let proof_merkle_root: felt252 = pi_root.try_into().unwrap();
             let nullifier_hash: felt252 = pi_nullifier.try_into().unwrap();
@@ -234,16 +235,18 @@ mod vault {
             assert(!self.nullifiers_used.entry(nullifier_hash).read(), 'ALREADY_CLAIMED');
             self.nullifiers_used.entry(nullifier_hash).write(true);
 
-            let share_count: u256 = self.heir_share_count.read().into();
-            assert(share_count > 0, 'NO_HEIRS');
+            // Weight is cryptographically bound in the ZK proof (basis points, 1-10000)
+            assert(pi_weight > 0, 'ZERO_WEIGHT');
+            assert(pi_weight <= 10000, 'WEIGHT_EXCEEDS_MAX');
+
             let erc20 = IERC20Dispatcher { contract_address: token };
             let balance = erc20.balance_of(get_contract_address());
-            let share = balance / share_count;
+            let share = balance * pi_weight / 10000;
             assert(share > 0, 'ZERO_SHARE');
 
             let caller = get_caller_address();
             erc20.transfer(caller, share);
-            self.emit(ZKClaim { nullifier_hash, token, amount: share });
+            self.emit(ZKClaim { nullifier_hash, token, amount: share, weight_bps: pi_weight });
         }
 
         fn set_verifier_address(ref self: ContractState, verifier: ContractAddress) {
@@ -251,11 +254,10 @@ mod vault {
             self.verifier_address.write(verifier);
         }
 
-        fn set_heir_merkle_root(ref self: ContractState, root: felt252, heir_share_count: u32) {
+        fn set_heir_merkle_root(ref self: ContractState, root: felt252) {
             assert_only_owner(@self);
-            assert(heir_share_count > 0, 'INVALID_HEIR_COUNT');
+            assert(root != 0, 'INVALID_MERKLE_ROOT');
             self.heir_merkle_root.write(root);
-            self.heir_share_count.write(heir_share_count);
         }
 
         fn is_claimable(self: @ContractState) -> bool {

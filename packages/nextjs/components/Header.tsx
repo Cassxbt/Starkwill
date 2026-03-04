@@ -23,6 +23,7 @@ export const menuLinks: HeaderMenuLink[] = [
   { label: "Home", href: "/" },
   { label: "Create Vault", href: "/create" },
   { label: "Dashboard", href: "/dashboard" },
+  { label: "Guardian", href: "/guardian" },
   { label: "Claim", href: "/claim" },
 ];
 

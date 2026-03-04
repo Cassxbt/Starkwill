@@ -49,6 +49,7 @@ const Claim = () => {
   const { address, status } = useAccount();
   const shouldReduceMotion = useReducedMotion();
   const [heirSecret, setHeirSecret] = useState("");
+  const [heirWeight, setHeirWeight] = useState("");
   const [heirCommitments, setHeirCommitments] = useState("");
   const [claimStatus, setClaimStatus] = useState<ClaimStatus>("idle");
   const [statusDetail, setStatusDetail] = useState("");
@@ -79,16 +80,17 @@ const Claim = () => {
   const vaultAddr = deployedVault?.address ? BigInt(deployedVault.address) : 0n;
 
   const derivedValues = useMemo(() => {
-    if (!heirSecret.trim()) return null;
+    if (!heirSecret.trim() || !heirWeight.trim()) return null;
     try {
       const secret = BigInt(heirSecret.startsWith("0x") ? heirSecret : "0x" + heirSecret);
-      const commitment = computeCommitment(secret);
+      const weightBps = BigInt(Math.round(parseFloat(heirWeight) * 100)); // % → bps
+      const commitment = computeCommitment(secret, weightBps);
       const nullifier = computeNullifier(secret, vaultAddr);
-      return { commitment: toHex(commitment), nullifier: toHex(nullifier), secret };
+      return { commitment: toHex(commitment), nullifier: toHex(nullifier), secret, weightBps };
     } catch {
       return null;
     }
-  }, [heirSecret, vaultAddr]);
+  }, [heirSecret, heirWeight, vaultAddr]);
 
   const parsedCommitments = useMemo(() => {
     if (!heirCommitments.trim()) return null;
@@ -111,7 +113,7 @@ const Claim = () => {
     try {
       setClaimStatus("generating");
       const result = await generateClaimProof(
-        derivedValues.secret, parsedCommitments, vaultAddr,
+        derivedValues.secret, derivedValues.weightBps, parsedCommitments, vaultAddr,
         (detail) => setStatusDetail(detail),
       );
       setClaimStatus("submitting");
@@ -225,7 +227,7 @@ const Claim = () => {
                 </div>
               )}
               <button
-                onClick={() => { setClaimStatus("idle"); setHeirSecret(""); }}
+                onClick={() => { setClaimStatus("idle"); setHeirSecret(""); setHeirWeight(""); }}
                 className="px-6 py-2.5 text-sm font-medium border border-emerald-500/15 text-emerald-400 hover:bg-emerald-500/10 transition-all"
               >
                 Done
@@ -307,6 +309,23 @@ const Claim = () => {
                     className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] font-mono-code placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
                     disabled={claimStatus !== "idle"}
                   />
+                  <div>
+                    <label className="text-[11px] text-[var(--sw-text-secondary)] block mb-1.5 font-medium">Your Share Weight (%)</label>
+                    <input
+                      type="number"
+                      value={heirWeight}
+                      onChange={(e) => setHeirWeight(e.target.value)}
+                      placeholder="e.g. 50"
+                      min="0.01"
+                      max="100"
+                      step="0.01"
+                      className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
+                      disabled={claimStatus !== "idle"}
+                    />
+                    <p className="text-[11px] text-[var(--sw-text-placeholder)] mt-1">
+                      The weight assigned to you by the vault owner (cryptographically verified).
+                    </p>
+                  </div>
 
                   {derivedValues && claimStatus === "idle" && (
                     <div className="p-4 bg-emerald-500/[0.04] border border-emerald-500/10 space-y-3">
@@ -384,7 +403,7 @@ const Claim = () => {
               <motion.div variants={mv(staggerItem)}>
                 <button
                   onClick={handleClaim}
-                  disabled={!heirSecret || !derivedValues || !parsedCommitments?.length || claimStatus !== "idle" || !isClaimable}
+                  disabled={!heirSecret || !heirWeight || !derivedValues || !parsedCommitments?.length || claimStatus !== "idle" || !isClaimable}
                   className="w-full px-7 py-3.5 font-semibold text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 disabled:opacity-30 disabled:pointer-events-none transition-colors"
                 >
                   {status !== "connected" ? (

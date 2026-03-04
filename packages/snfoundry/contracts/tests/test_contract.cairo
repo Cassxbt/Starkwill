@@ -98,7 +98,7 @@ fn test_set_heir_merkle_root() {
     let (addr, dispatcher) = deploy_vault();
 
     cheat_caller_address(addr, OWNER(), CheatSpan::TargetCalls(1));
-    dispatcher.set_heir_merkle_root(0x1234, 3);
+    dispatcher.set_heir_merkle_root(0x1234);
 
     assert(dispatcher.get_heir_merkle_root() == 0x1234, 'Root mismatch');
 }
@@ -120,7 +120,7 @@ fn test_set_merkle_root_not_owner() {
     let (addr, dispatcher) = deploy_vault();
 
     cheat_caller_address(addr, HEIR_1(), CheatSpan::TargetCalls(1));
-    dispatcher.set_heir_merkle_root(0x1234, 3);
+    dispatcher.set_heir_merkle_root(0x1234);
 }
 
 #[test]

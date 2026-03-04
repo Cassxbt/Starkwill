@@ -8,6 +8,8 @@ No lawyers. No centralized custodians. No identity exposure. Just math.
 
 > Built for the [Starknet Re{define} Hackathon 2026](https://dorahacks.io/hackathon/redefine/detail) — Privacy Track
 
+**[Live Demo](https://starkwill.vercel.app)** | **[Video Demo](#)**
+
 ---
 
 ## The Problem
@@ -34,11 +36,42 @@ Heir identity on claim           ZK proof of Merkle membership (Noir + Garaga)
 Heir list                        Stored as Blake3 commitment hashes, not addresses
 Which heir claimed               Nullifier hash — prevents double-claim without linking identity
 Heir-to-secret mapping           Secrets never leave the heir's browser
+Heir share percentages           Weight bound inside ZK proof, not stored on-chain
+Deposit source linkage           Tongo confidential transfers break the on-chain trail
 
 WHAT'S PUBLIC (by design)
 ─────────────────────────
 Vault existence, owner address, check-in timestamps,
 guardian addresses, token types, total balance
+```
+
+### Privacy Flow
+
+```
+                Owner's Wallet
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+     Standard Deposit      Private Deposit
+     (direct ERC-20)       (via Tongo)
+          │                       │
+          │              ┌────────┴────────┐
+          │              │  1. Fund Tongo  │  ERC-20 → encrypted balance
+          │              │  2. Withdraw    │  encrypted → vault (breaks link)
+          │              └────────┬────────┘
+          │                       │
+          └───────────┬───────────┘
+                      ▼
+              ┌──────────────┐
+              │ StarkWill    │  Assets held in vault
+              │ Vault        │  Owner checks in periodically
+              └──────┬───────┘
+                     │ Owner stops checking in
+                     ▼
+              ┌──────────────┐
+              │ Heir claims  │  ZK proof: "I'm in the heir group"
+              │ anonymously  │  No identity revealed on-chain
+              └──────────────┘
 ```
 
 ---
@@ -96,7 +129,8 @@ guardian addresses, token types, total balance
 | Page | Description |
 |------|-------------|
 | **Create Vault** | 4-step wizard: timing config, guardian addresses, heir secrets (live Merkle tree computation), token whitelist |
-| **Dashboard** | Check-in button, deposit assets, view vault status and timers |
+| **Dashboard** | Check-in, standard & private (Tongo) deposits, vault status, ZK claim event history |
+| **Guardian** | Emergency 2-of-3 unlock approval for designated guardians |
 | **Claim** | Enter heir secret, generate ZK proof in-browser (~5s via bb.js WASM), submit anonymous claim |
 | **How It Works** | Interactive explainer of the protocol |
 
@@ -112,6 +146,7 @@ guardian addresses, token types, total balance
 | On-chain Verifier | Garaga v1.0.1 | Gas-efficient proof verification on Starknet |
 | Frontend | Next.js 15, Scaffold-Stark 2 | Wallet connection, contract interaction |
 | Hashing | Blake3 (@noble/hashes) | Merkle tree + commitment + nullifier derivation |
+| Confidential Transfers | Tongo SDK (ElGamal encryption) | Private deposits — breaks on-chain source linkage |
 | Network | Starknet Sepolia | Testnet deployment |
 
 ---
@@ -120,10 +155,10 @@ guardian addresses, token types, total balance
 
 | Contract | Address |
 |----------|---------|
-| StarkWill Vault | [`0x055fbb6f...9fef37`](https://sepolia.starkscan.co/contract/0x055fbb6facff75ee0f8146f32c9da8a67b0ece9c1d99fa0257b830375c9fef37) |
+| StarkWill Vault (v2, weighted shares) | [`0x656c5beb...c8673`](https://sepolia.starkscan.co/contract/0x656c5beb9d880efeb4a1f25a2fb030737c85b410c5fd83e55b9ff370c0c8673) |
 | ZK Verifier (Garaga) | [`0x02ba3af4...cb9f53`](https://sepolia.starkscan.co/contract/0x02ba3af461b512d9053f6435d0a0b9278394cd7adb461450c258d586a8cb9f53) |
 
-Both contracts are verified and functional on Sepolia. The vault has been E2E tested: deploy → set verifier → set heir Merkle root → deposit STRK → generate ZK proof → claim with proof.
+Both contracts are verified and functional on Sepolia. The vault supports **weighted heir shares** — each heir's share percentage is cryptographically bound in their ZK proof via the Noir circuit, with no on-chain weight mapping (preserving full privacy). E2E tested: deploy → set verifier → set heir Merkle root → deposit STRK → generate ZK proof → claim with weighted proof.
 
 ---
 
@@ -133,7 +168,7 @@ Both contracts are verified and functional on Sepolia. The vault has been E2E te
 
 1. **Create vault** — configure check-in period (e.g., 30 days), grace period, and 3 guardian addresses
 2. **Add heirs** — each heir generates a secret offline; owner registers Blake3 commitment hashes in a Merkle tree
-3. **Deposit assets** — whitelist and deposit any ERC-20 token (ETH, STRK, WBTC)
+3. **Deposit assets** — whitelist and deposit any ERC-20 token (ETH, STRK, WBTC). Optional **private deposits** via Tongo break the on-chain link between your wallet and the vault
 4. **Check in periodically** — resets the dead-man's switch timer. Miss a check-in → vault becomes claimable
 
 ### For Heirs
@@ -179,13 +214,15 @@ starkwill-app/
 │   ├── nextjs/                      # Frontend
 │   │   ├── app/
 │   │   │   ├── create/              # Vault creation wizard
-│   │   │   ├── dashboard/           # Owner dashboard
+│   │   │   ├── dashboard/           # Owner dashboard + Tongo deposits
+│   │   │   ├── guardian/            # Guardian emergency unlock
 │   │   │   ├── claim/               # Anonymous heir claim
 │   │   │   └── how-it-works/        # Protocol explainer
 │   │   └── utils/starkwill/
 │   │       ├── merkle.ts            # Blake3 Merkle tree (mirrors Noir circuit)
 │   │       ├── prover.ts            # In-browser ZK proof generation
-│   │       └── tokens.ts            # Token registry
+│   │       ├── tokens.ts            # Token registry
+│   │       └── tongo.ts             # Tongo confidential transfer wrapper
 │   └── snfoundry/
 │       ├── contracts/
 │       │   ├── src/

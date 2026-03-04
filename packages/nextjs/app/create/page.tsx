@@ -27,6 +27,7 @@ const CreateVault = () => {
   const [graceDays, setGraceDays] = useState("7");
   const [guardians, setGuardians] = useState(["", "", ""]);
   const [heirSecrets, setHeirSecrets] = useState<string[]>([""]);
+  const [heirWeights, setHeirWeights] = useState<string[]>(["100"]);
   const [step, setStep] = useState(0);
   const [setupStatus, setSetupStatus] = useState<"idle" | "computing" | "submitting" | "success" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState("");
@@ -42,7 +43,7 @@ const CreateVault = () => {
   const { sendAsync: setHeirMerkleRoot, isPending: isSettingRoot } = useScaffoldWriteContract({
     contractName: "vault",
     functionName: "set_heir_merkle_root",
-    args: [undefined, undefined],
+    args: [undefined],
   });
 
   const { sendAsync: whitelistToken, isPending: isWhitelisting } = useScaffoldWriteContract({
@@ -59,16 +60,25 @@ const CreateVault = () => {
     setGuardians(updated);
   };
 
-  const addHeir = () => setHeirSecrets([...heirSecrets, ""]);
+  const addHeir = () => {
+    setHeirSecrets([...heirSecrets, ""]);
+    setHeirWeights([...heirWeights, ""]);
+  };
   const removeHeir = (index: number) => {
     if (heirSecrets.length > 1) {
       setHeirSecrets(heirSecrets.filter((_, i) => i !== index));
+      setHeirWeights(heirWeights.filter((_, i) => i !== index));
     }
   };
   const updateHeir = (index: number, value: string) => {
     const updated = [...heirSecrets];
     updated[index] = value;
     setHeirSecrets(updated);
+  };
+  const updateWeight = (index: number, value: string) => {
+    const updated = [...heirWeights];
+    updated[index] = value;
+    setHeirWeights(updated);
   };
 
   const toggleToken = (symbol: string) => {
@@ -77,20 +87,27 @@ const CreateVault = () => {
     );
   };
 
+  const totalWeight = useMemo(() => {
+    return heirWeights.reduce((sum, w) => sum + (parseFloat(w) || 0), 0);
+  }, [heirWeights]);
+
   const merkleData = useMemo(() => {
-    const validSecrets = heirSecrets.filter((s) => s.trim().length > 0);
-    if (validSecrets.length === 0) return null;
+    const validPairs = heirSecrets
+      .map((s, i) => ({ secret: s.trim(), weight: heirWeights[i]?.trim() }))
+      .filter((p) => p.secret.length > 0 && p.weight.length > 0 && parseFloat(p.weight) > 0);
+    if (validPairs.length === 0) return null;
     try {
-      const commitments = validSecrets.map((s) => {
-        const secret = BigInt(s.startsWith("0x") ? s : "0x" + s);
-        return computeCommitment(secret);
+      const commitments = validPairs.map((p) => {
+        const secret = BigInt(p.secret.startsWith("0x") ? p.secret : "0x" + p.secret);
+        const weightBps = BigInt(Math.round(parseFloat(p.weight) * 100)); // % → bps
+        return computeCommitment(secret, weightBps);
       });
       const tree = buildMerkleTree(commitments);
-      return { root: tree.root, rootHex: toHex(tree.root), count: validSecrets.length };
+      return { root: tree.root, rootHex: toHex(tree.root), count: validPairs.length };
     } catch {
       return null;
     }
-  }, [heirSecrets]);
+  }, [heirSecrets, heirWeights]);
 
   const handleSetupVault = async () => {
     if (!merkleData) return;
@@ -98,7 +115,7 @@ const CreateVault = () => {
     setErrorMsg("");
     try {
       setSetupStatus("submitting");
-      await setHeirMerkleRoot({ args: [merkleData.rootHex, merkleData.count] });
+      await setHeirMerkleRoot({ args: [merkleData.rootHex] });
       setComputedRoot(merkleData.rootHex);
       for (const symbol of tokensToWhitelist) {
         const tokenAddr = getTokenAddress(symbol);
@@ -322,7 +339,7 @@ const CreateVault = () => {
                     </button>
                   </div>
                   <p className="text-xs text-[var(--sw-text-tertiary)]">
-                    Enter each heir&apos;s secret (hex). The commitment hash2(secret, 0) is computed automatically.
+                    Enter each heir&apos;s secret (hex) and their share weight (%). Weights are cryptographically bound in the ZK proof.
                   </p>
                   {heirSecrets.map((h, i) => (
                     <div key={i} className="flex gap-2">
@@ -333,6 +350,16 @@ const CreateVault = () => {
                         placeholder="0x... (heir secret)"
                         className="flex-1 px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] font-mono-code placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
                       />
+                      <input
+                        type="number"
+                        value={heirWeights[i] || ""}
+                        onChange={(e) => updateWeight(i, e.target.value)}
+                        placeholder="%"
+                        min="0.01"
+                        max="100"
+                        step="0.01"
+                        className="w-20 px-3 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] text-center placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
+                      />
                       {heirSecrets.length > 1 && (
                         <button onClick={() => removeHeir(i)} className="px-3 border border-[var(--sw-border)] text-[var(--sw-text-tertiary)] hover:text-red-400 hover:border-red-500/20 transition-all">
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -342,6 +369,16 @@ const CreateVault = () => {
                       )}
                     </div>
                   ))}
+
+                  {/* Weight total indicator */}
+                  <div className={`text-xs font-medium ${
+                    Math.abs(totalWeight - 100) < 0.01
+                      ? "text-emerald-400"
+                      : "text-amber-400"
+                  }`}>
+                    Total weight: {totalWeight.toFixed(2)}%
+                    {Math.abs(totalWeight - 100) >= 0.01 && " (should equal 100%)"}
+                  </div>
 
                   {merkleData && (
                     <div className="p-4 bg-emerald-500/[0.06] border border-emerald-500/15 space-y-1.5">
@@ -384,7 +421,7 @@ const CreateVault = () => {
                       { label: "Check-in Period", value: `${checkinDays} days` },
                       { label: "Grace Period", value: `${graceDays} days` },
                       { label: "Guardians", value: `${guardians.filter((g) => g.length > 0).length} / 3` },
-                      { label: "Heirs", value: `${merkleData?.count ?? 0}` },
+                      { label: "Heirs", value: `${merkleData?.count ?? 0} (weighted shares)` },
                       { label: "Tokens", value: tokensToWhitelist.join(", ") },
                     ].map((row) => (
                       <div key={row.label} className="flex justify-between items-center py-1 border-b border-[var(--sw-border-faint)] last:border-0">

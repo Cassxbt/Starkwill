@@ -7,7 +7,7 @@ const deployedContracts = {
   sepolia: {
     vault: {
       address:
-        "0x055fbb6facff75ee0f8146f32c9da8a67b0ece9c1d99fa0257b830375c9fef37",
+        "0x656c5beb9d880efeb4a1f25a2fb030737c85b410c5fd83e55b9ff370c0c8673",
       abi: [
         {
           type: "impl",
@@ -190,10 +190,6 @@ const deployedContracts = {
                   name: "root",
                   type: "core::felt252",
                 },
-                {
-                  name: "heir_share_count",
-                  type: "core::integer::u32",
-                },
               ],
               outputs: [],
               state_mutability: "external",
@@ -303,6 +299,11 @@ const deployedContracts = {
               type: "core::integer::u256",
               kind: "data",
             },
+            {
+              name: "weight_bps",
+              type: "core::integer::u256",
+              kind: "data",
+            },
           ],
         },
         {
@@ -319,7 +320,7 @@ const deployedContracts = {
         },
       ],
       classHash:
-        "0x6854a0497afcfaedd9e0c49bccf1febbd9ec298781acc42327f75bb1459c16c",
+        "0x6c31f8391d18439ce128c3a5ac10e88ceabbb8c44290fd4527f07ce1062629a",
     },
   },
 } as const;

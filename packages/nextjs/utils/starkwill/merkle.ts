@@ -5,7 +5,7 @@
  *   hash2(a, b) = blake3(a.to_be_bytes(32) || b.to_be_bytes(32))[0..31] as bigint
  *
  * Used for:
- * - Computing heir commitments: commitment = hash2(secret, 0n)
+ * - Computing heir commitments: commitment = hash2(secret, weight_bps)
  * - Building the Merkle tree from commitments
  * - Generating proof paths for individual heirs
  * - Computing nullifiers: nullifier = hash2(secret, vaultAddress)
@@ -51,11 +51,11 @@ export function hash2(a: bigint, b: bigint): bigint {
 }
 
 /**
- * Compute an heir's identity commitment from their secret.
- * commitment = hash2(secret, 0)
+ * Compute an heir's identity commitment from their secret and weight.
+ * commitment = hash2(secret, weight_bps)
  */
-export function computeCommitment(secret: bigint): bigint {
-  return hash2(secret, ZERO);
+export function computeCommitment(secret: bigint, weightBps: bigint): bigint {
+  return hash2(secret, weightBps);
 }
 
 /**
@@ -190,20 +190,23 @@ export function toHex(value: bigint): string {
  */
 export function generateClaimInputs(
   secret: bigint,
+  weightBps: bigint,
   tree: MerkleTree,
   leafIndex: number,
   vaultAddress: bigint,
 ): {
   // Private inputs
   secret: string;
+  weight_bps: string;
   path_indices: string[];
   path_siblings: string[];
   // Public inputs
   merkle_root: string;
   nullifier_hash: string;
   vault_address: string;
+  weight_bps_pub: string;
 } {
-  const commitment = computeCommitment(secret);
+  const commitment = computeCommitment(secret, weightBps);
   const proof = generateMerkleProof(tree, leafIndex);
   const nullifier = computeNullifier(secret, vaultAddress);
 
@@ -214,11 +217,13 @@ export function generateClaimInputs(
 
   return {
     secret: toHex(secret),
+    weight_bps: toHex(weightBps),
     path_indices: proof.pathIndices.map(toHex),
     path_siblings: proof.pathSiblings.map(toHex),
     merkle_root: toHex(tree.root),
     nullifier_hash: toHex(nullifier),
     vault_address: toHex(vaultAddress),
+    weight_bps_pub: toHex(weightBps),
   };
 }
 
@@ -229,9 +234,11 @@ export function generateClaimInputs(
 export function toProverToml(inputs: ReturnType<typeof generateClaimInputs>): string {
   const lines: string[] = [];
   lines.push(`secret = "${inputs.secret}"`);
+  lines.push(`weight_bps = "${inputs.weight_bps}"`);
   lines.push(`merkle_root = "${inputs.merkle_root}"`);
   lines.push(`nullifier_hash = "${inputs.nullifier_hash}"`);
   lines.push(`vault_address = "${inputs.vault_address}"`);
+  lines.push(`weight_bps_pub = "${inputs.weight_bps_pub}"`);
   lines.push("");
   lines.push(`path_indices = [${inputs.path_indices.map((v) => `"${v}"`).join(", ")}]`);
   lines.push(`path_siblings = [${inputs.path_siblings.map((v) => `"${v}"`).join(", ")}]`);

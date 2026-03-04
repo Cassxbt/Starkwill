@@ -82,13 +82,15 @@ export interface ProveResult {
 /**
  * Generate a ZK proof and Starknet calldata for an heir claim.
  *
- * @param secret - Heir's secret (bigint or hex string)
+ * @param secret - Heir's secret (bigint)
+ * @param weightBps - Heir's weight in basis points (1-10000)
  * @param commitments - All heir commitments (for building the Merkle tree)
  * @param vaultAddress - Vault contract address as bigint
  * @param onStatus - Progress callback
  */
 export async function generateClaimProof(
   secret: bigint,
+  weightBps: bigint,
   commitments: bigint[],
   vaultAddress: bigint,
   onStatus?: (status: string) => void,
@@ -97,7 +99,7 @@ export async function generateClaimProof(
   const [circuit, vk] = await Promise.all([loadCircuit(), loadVK(), ensureGaraga()]);
 
   onStatus?.("Building Merkle tree...");
-  const commitment = computeCommitment(secret);
+  const commitment = computeCommitment(secret, weightBps);
   const tree = buildMerkleTree(commitments);
   const leafIndex = commitments.findIndex((c) => c === commitment);
   if (leafIndex === -1) {
@@ -113,11 +115,13 @@ export async function generateClaimProof(
 
   const circuitInputs: Record<string, string | string[]> = {
     secret: toHex(secret),
+    weight_bps: toHex(weightBps),
     path_indices: proof.pathIndices.map(toHex),
     path_siblings: proof.pathSiblings.map(toHex),
     merkle_root: toHex(tree.root),
     nullifier_hash: toHex(nullifier),
     vault_address: toHex(vaultAddress),
+    weight_bps_pub: toHex(weightBps),
   };
 
   onStatus?.("Executing circuit (computing witness)...");

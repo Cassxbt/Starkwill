@@ -24,6 +24,7 @@ fn hash2(a: Field, b: Field) -> Field {
 fn main(
     // Private inputs (witness - never revealed on-chain)
     secret: Field,
+    weight_bps: Field,
     path_indices: [Field; DEPTH],
     path_siblings: [Field; DEPTH],
 
@@ -31,11 +32,15 @@ fn main(
     merkle_root: pub Field,
     nullifier_hash: pub Field,
     vault_address: pub Field,
+    weight_bps_pub: pub Field,
 ) {
-    // 1. Compute identity commitment from secret
-    let commitment = hash2(secret, 0);
+    // 1. Verify weight consistency (private == public)
+    assert(weight_bps == weight_bps_pub, "Weight mismatch");
 
-    // 2. Verify Merkle membership - walk from leaf to root
+    // 2. Compute identity commitment from secret + weight
+    let commitment = hash2(secret, weight_bps);
+
+    // 3. Verify Merkle membership - walk from leaf to root
     let mut current = commitment;
     for i in 0..DEPTH {
         let left = if path_indices[i] == 0 { current } else { path_siblings[i] };
@@ -44,7 +49,7 @@ fn main(
     }
     assert(current == merkle_root, "Merkle proof invalid");
 
-    // 3. Compute and verify nullifier (prevents double-claiming)
+    // 4. Compute and verify nullifier (prevents double-claiming)
     let computed_nullifier = hash2(secret, vault_address);
     assert(computed_nullifier == nullifier_hash, "Nullifier mismatch");
 }
