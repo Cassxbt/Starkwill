@@ -38,7 +38,6 @@
     "verify": "yarn workspace @ss-2/snfoundry verify",
     "clean": "yarn workspace @ss-2/snfoundry clean"
   },
-  "packageManager": "yarn@3.2.3",
   "devDependencies": {
     "daisyui": "^4.7.3",
     "husky": "^9.0.11",
@@ -47,8 +46,5 @@
   },
   "dependencies": {
     "postcss": "^8.4.38"
-  },
-  "optionalDependencies": {
-    "@next/swc-darwin-arm64": "^15.2.5"
   }
 }
