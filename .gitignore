@@ -15,4 +15,14 @@ package-lock.json
 .vercel
 
 **/.env*
-!**/.env.example.github/workflows/
+!**/.env.example
+.github/workflows/
+
+# Internal docs (not for repo)
+BUILD_LOG.md
+PRD.md
+HACKATHON_DETAILS.md
+
+# Backup dirs with secrets
+**/heir_verifier_backup_v1/
+**/.secrets
