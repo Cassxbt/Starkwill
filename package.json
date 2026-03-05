@@ -34,7 +34,7 @@
     "test:nextjs": "yarn workspace @ss-2/nextjs test",
     "format": "yarn workspace @ss-2/nextjs format && yarn workspace @ss-2/snfoundry format",
     "format:check": "yarn workspace @ss-2/nextjs format:check && yarn workspace @ss-2/snfoundry format:check",
-    "prepare": "husky",
+    "prepare": "husky || true",
     "verify": "yarn workspace @ss-2/snfoundry verify",
     "clean": "yarn workspace @ss-2/snfoundry clean"
   },
