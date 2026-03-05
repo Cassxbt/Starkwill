@@ -1,5 +1,5 @@
 import { Connector, useConnect } from "@starknet-react/core";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useLocalStorage } from "usehooks-ts";
 import { BurnerConnector, burnerAccounts } from "@scaffold-stark/stark-burner";
 import { useTheme } from "next-themes";
@@ -12,7 +12,7 @@ import { useTargetNetwork } from "~~/hooks/scaffold-stark/useTargetNetwork";
 const loader = ({ src }: { src: string }) => src;
 
 const ConnectModal = () => {
-  const modalRef = useRef<HTMLInputElement>(null);
+  const [isOpen, setIsOpen] = useState(false);
   const [isBurnerWallet, setIsBurnerWallet] = useState(false);
   const { resolvedTheme } = useTheme();
   const isDarkMode = resolvedTheme === "dark";
@@ -32,10 +32,8 @@ const ConnectModal = () => {
   const { targetNetwork } = useTargetNetwork();
   const [showOtherOptions, setShowOtherOptions] = useState(false);
 
-  // Identify devnet by network name
   const isDevnet = targetNetwork.network === "devnet";
 
-  // Split connectors into main and other options for devnet
   let mainConnectors = connectors;
   let otherConnectors: typeof connectors = [];
   if (isDevnet) {
@@ -44,7 +42,7 @@ const ConnectModal = () => {
   }
 
   const handleCloseModal = () => {
-    if (modalRef.current) modalRef.current.checked = false;
+    setIsOpen(false);
   };
 
   function handleConnectWallet(
@@ -79,19 +77,14 @@ const ConnectModal = () => {
 
   return (
     <div>
-      <label
-        htmlFor="connect-modal"
-        className="rounded-[18px] btn-sm  font-bold px-8 bg-btn-wallet py-3 cursor-pointer"
+      <button
+        type="button"
+        onClick={() => setIsOpen(true)}
+        className="rounded-[18px] btn-sm font-bold px-8 bg-btn-wallet py-3 cursor-pointer"
       >
         <span>Connect</span>
-      </label>
-      <input
-        ref={modalRef}
-        type="checkbox"
-        id="connect-modal"
-        className="modal-toggle"
-      />
-      <GenericModal modalId="connect-modal">
+      </button>
+      <GenericModal modalId="connect-modal" isOpen={isOpen} onClose={handleCloseModal}>
         <>
           <div className="flex items-center justify-between">
             <h3 className="text-xl font-bold">
@@ -101,16 +94,17 @@ const ConnectModal = () => {
                   ? "Other Wallet Options"
                   : "Connect a Wallet"}
             </h3>
-            <label
+            <button
+              type="button"
               onClick={() => {
                 setIsBurnerWallet(false);
                 setShowOtherOptions(false);
+                handleCloseModal();
               }}
-              htmlFor="connect-modal"
               className="btn btn-ghost btn-sm btn-circle cursor-pointer"
             >
               ✕
-            </label>
+            </button>
           </div>
           <div className="flex flex-col flex-1 lg:grid">
             <div className="flex flex-col gap-4 w-full px-8 py-10">

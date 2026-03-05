@@ -89,7 +89,7 @@
 @layer utilities {
   :root,
   [data-theme] {
-    background: oklch(var(--b2));
+    background: var(--color-base-200);
   }
 
   body {
