@@ -11,15 +11,10 @@ import { green, red } from "./helpers/colorize-log";
 
 const deployScript = async (): Promise<void> => {
   await deployContract({
-    contract: "vault",
+    contract: "vault_factory",
     constructorArgs: {
-      owner: deployer.address,
-      checkin_period_secs: 60, // 1 minute (short for demo)
-      grace_period_secs: 60, // 1 minute (short for demo)
-      cancelable_until_ts: Math.floor(Date.now() / 1000) + 31536000, // 1 year
-      guardian_1: deployer.address,
-      guardian_2: "0x0000000000000000000000000000000000000000000000000000000000000001",
-      guardian_3: "0x0000000000000000000000000000000000000000000000000000000000000002",
+      vault_class_hash:
+        "0x6c31f8391d18439ce128c3a5ac10e88ceabbb8c44290fd4527f07ce1062629a",
     },
   });
 };

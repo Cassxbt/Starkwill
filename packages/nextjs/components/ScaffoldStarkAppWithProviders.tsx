@@ -9,6 +9,7 @@ import { Header } from "~~/components/Header";
 import { appChains, connectors } from "~~/services/web3/connectors";
 import provider from "~~/services/web3/provider";
 import { useNativeCurrencyPrice } from "~~/hooks/scaffold-stark/useNativeCurrencyPrice";
+import { VaultProvider } from "~~/contexts/VaultContext";
 
 const Footer = dynamic(
   () => import("~~/components/Footer").then((mod) => mod.Footer),
@@ -52,7 +53,9 @@ export const ScaffoldStarkAppWithProviders = ({
       connectors={connectors}
       explorer={starkscan}
     >
-      <ScaffoldStarkApp>{children}</ScaffoldStarkApp>
+      <VaultProvider factoryAddress={process.env.NEXT_PUBLIC_FACTORY_ADDRESS}>
+        <ScaffoldStarkApp>{children}</ScaffoldStarkApp>
+      </VaultProvider>
     </StarknetConfig>
   );
 };

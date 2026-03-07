@@ -1,15 +1,15 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import type { Variants } from "framer-motion";
 import { useAccount } from "@starknet-react/core";
-import { useScaffoldReadContract } from "~~/hooks/scaffold-stark/useScaffoldReadContract";
-import { useScaffoldWriteContract } from "~~/hooks/scaffold-stark/useScaffoldWriteContract";
-import { useDeployedContractInfo } from "~~/hooks/scaffold-stark";
+import { useTransactor } from "~~/hooks/scaffold-stark";
+import { Contract as StarknetContract } from "starknet";
 import { computeCommitment, computeNullifier, toHex } from "~~/utils/starkwill/merkle";
 import { TOKENS, getTokenAddress } from "~~/utils/starkwill/tokens";
 import { generateClaimProof } from "~~/utils/starkwill/prover";
+import { useVault, VAULT_ABI } from "~~/contexts/VaultContext";
 
 type ClaimStatus = "idle" | "computing" | "generating" | "submitting" | "success" | "error";
 
@@ -48,6 +48,10 @@ const PulseRing = ({ color }: { color: string }) => (
 const Claim = () => {
   const { address, status } = useAccount();
   const shouldReduceMotion = useReducedMotion();
+  const { writeTransaction } = useTransactor();
+  const { vaultAddress, hasVault } = useVault();
+
+  const [manualVaultAddr, setManualVaultAddr] = useState("");
   const [heirSecret, setHeirSecret] = useState("");
   const [heirWeight, setHeirWeight] = useState("");
   const [heirCommitments, setHeirCommitments] = useState("");
@@ -55,42 +59,49 @@ const Claim = () => {
   const [statusDetail, setStatusDetail] = useState("");
   const [selectedToken, setSelectedToken] = useState("STRK");
   const [errorMsg, setErrorMsg] = useState("");
+  const [isClaimable, setIsClaimable] = useState<boolean | null>(null);
+  const [merkleRoot, setMerkleRoot] = useState<string | null>(null);
 
-  const { data: deployedVault } = useDeployedContractInfo("vault");
+  const targetVaultAddr = hasVault ? vaultAddress : (manualVaultAddr.startsWith("0x") && manualVaultAddr.length > 10 ? manualVaultAddr : null);
+  const vaultAddrBigInt = targetVaultAddr ? BigInt(targetVaultAddr) : 0n;
 
-  const { data: isClaimable } = useScaffoldReadContract({
-    contractName: "vault",
-    functionName: "is_claimable",
-    args: [],
-  });
-
-  const { data: heirMerkleRoot } = useScaffoldReadContract({
-    contractName: "vault",
-    functionName: "get_heir_merkle_root",
-    args: [],
-  });
-
-  const { sendAsync: claimWithProof, isPending: isClaiming } = useScaffoldWriteContract({
-    contractName: "vault",
-    functionName: "claim_with_proof",
-    args: [undefined, undefined],
-  });
+  useEffect(() => {
+    if (!targetVaultAddr) { setIsClaimable(null); setMerkleRoot(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { RpcProvider } = await import("starknet");
+        const provider = new RpcProvider({ nodeUrl: process.env.NEXT_PUBLIC_SEPOLIA_PROVIDER_URL || "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/_hKu4IgnPgrF8O82GLuYU" });
+        const contract = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddr, providerOrAccount: provider });
+        const [claimable, root] = await Promise.all([
+          contract.call("is_claimable"),
+          contract.call("get_heir_merkle_root"),
+        ]);
+        if (cancelled) return;
+        setIsClaimable(!!claimable);
+        const rootStr = typeof root === "bigint" ? root.toString() : String(root);
+        setMerkleRoot(rootStr === "0" ? null : rootStr);
+      } catch {
+        if (!cancelled) { setIsClaimable(null); setMerkleRoot(null); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [targetVaultAddr]);
 
   const mv = (v: Variants | undefined) => (shouldReduceMotion ? undefined : v);
-  const vaultAddr = deployedVault?.address ? BigInt(deployedVault.address) : 0n;
 
   const derivedValues = useMemo(() => {
     if (!heirSecret.trim() || !heirWeight.trim()) return null;
     try {
       const secret = BigInt(heirSecret.startsWith("0x") ? heirSecret : "0x" + heirSecret);
-      const weightBps = BigInt(Math.round(parseFloat(heirWeight) * 100)); // % → bps
+      const weightBps = BigInt(Math.round(parseFloat(heirWeight) * 100));
       const commitment = computeCommitment(secret, weightBps);
-      const nullifier = computeNullifier(secret, vaultAddr);
+      const nullifier = computeNullifier(secret, vaultAddrBigInt);
       return { commitment: toHex(commitment), nullifier: toHex(nullifier), secret, weightBps };
     } catch {
       return null;
     }
-  }, [heirSecret, heirWeight, vaultAddr]);
+  }, [heirSecret, heirWeight, vaultAddrBigInt]);
 
   const parsedCommitments = useMemo(() => {
     if (!heirCommitments.trim()) return null;
@@ -106,20 +117,22 @@ const Claim = () => {
   }, [heirCommitments]);
 
   const handleClaim = async () => {
-    if (!heirSecret || !derivedValues || !parsedCommitments?.length) return;
+    if (!heirSecret || !derivedValues || !parsedCommitments?.length || !targetVaultAddr) return;
     setClaimStatus("computing");
     setErrorMsg("");
     setStatusDetail("");
     try {
       setClaimStatus("generating");
       const result = await generateClaimProof(
-        derivedValues.secret, derivedValues.weightBps, parsedCommitments, vaultAddr,
+        derivedValues.secret, derivedValues.weightBps, parsedCommitments, vaultAddrBigInt,
         (detail) => setStatusDetail(detail),
       );
       setClaimStatus("submitting");
       setStatusDetail("Sending transaction...");
       const tokenAddr = getTokenAddress(selectedToken);
-      await claimWithProof({ args: [result.calldata, tokenAddr] });
+      const vault = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddr });
+      const call = vault.populate("claim_with_proof", [result.calldata, tokenAddr]);
+      await writeTransaction([call]);
       setClaimStatus("success");
     } catch (e: any) {
       console.error("Claim failed:", e);
@@ -145,33 +158,52 @@ const Claim = () => {
       </motion.div>
 
       <div className="w-full max-w-lg">
+        {/* Vault Address (manual entry for non-owners) */}
+        {!hasVault && (
+          <motion.div
+            variants={mv(fadeInUp)}
+            initial={shouldReduceMotion ? undefined : "hidden"}
+            animate="visible"
+            className="p-4 bg-[var(--sw-surface)] border border-[var(--sw-border)] mb-4"
+          >
+            <label className="text-xs text-[var(--sw-text-secondary)] block mb-1.5 font-medium">Vault Address</label>
+            <input
+              type="text"
+              value={manualVaultAddr}
+              onChange={(e) => setManualVaultAddr(e.target.value)}
+              placeholder="0x... (vault to claim from)"
+              className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] font-mono-code placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
+            />
+          </motion.div>
+        )}
+
         {/* Status Banner */}
-        <motion.div
-          variants={mv(fadeInUp)}
-          initial={shouldReduceMotion ? undefined : "hidden"}
-          animate="visible"
-          className={`p-4 bg-[var(--sw-surface)] border flex gap-3 mb-4 ${
-            isClaimable
-              ? "border-emerald-500/15"
-              : "border-amber-500/15"
-          }`}
-        >
-          <div className="flex gap-3 items-start">
-            <span className={`inline-flex h-2 w-2 rounded-full mt-1 shrink-0 ${
-              isClaimable ? "bg-emerald-400" : "bg-amber-400"
-            }`} />
-            <div>
-              <p className="text-sm font-medium text-[var(--sw-text)]">
-                Vault is {isClaimable ? "Claimable" : "Locked"}
-              </p>
-              <p className="text-[11px] text-[var(--sw-text-tertiary)] mt-0.5">
-                {isClaimable
-                  ? "Owner has not checked in. Heirs can claim assets."
-                  : "Owner is active. Claims are not available yet."}
-              </p>
+        {targetVaultAddr && (
+          <motion.div
+            variants={mv(fadeInUp)}
+            initial={shouldReduceMotion ? undefined : "hidden"}
+            animate="visible"
+            className={`p-4 bg-[var(--sw-surface)] border flex gap-3 mb-4 ${
+              isClaimable ? "border-emerald-500/15" : "border-amber-500/15"
+            }`}
+          >
+            <div className="flex gap-3 items-start">
+              <span className={`inline-flex h-2 w-2 rounded-full mt-1 shrink-0 ${
+                isClaimable ? "bg-emerald-400" : "bg-amber-400"
+              }`} />
+              <div>
+                <p className="text-sm font-medium text-[var(--sw-text)]">
+                  Vault is {isClaimable ? "Claimable" : "Locked"}
+                </p>
+                <p className="text-[11px] text-[var(--sw-text-tertiary)] mt-0.5">
+                  {isClaimable
+                    ? "Owner has not checked in. Heirs can claim assets."
+                    : "Owner is active. Claims are not available yet."}
+                </p>
+              </div>
             </div>
-          </div>
-        </motion.div>
+          </motion.div>
+        )}
 
         {/* ZK Privacy Banner */}
         <motion.div
@@ -399,15 +431,17 @@ const Claim = () => {
                 )}
               </AnimatePresence>
 
-              {/* Submit Button */}
+              {/* Submit */}
               <motion.div variants={mv(staggerItem)}>
                 <button
                   onClick={handleClaim}
-                  disabled={!heirSecret || !heirWeight || !derivedValues || !parsedCommitments?.length || claimStatus !== "idle" || !isClaimable}
+                  disabled={!heirSecret || !heirWeight || !derivedValues || !parsedCommitments?.length || claimStatus !== "idle" || !isClaimable || !targetVaultAddr}
                   className="w-full px-7 py-3.5 font-semibold text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 disabled:opacity-30 disabled:pointer-events-none transition-colors"
                 >
                   {status !== "connected" ? (
                     "Connect Wallet First"
+                  ) : !targetVaultAddr ? (
+                    "Enter Vault Address"
                   ) : !isClaimable ? (
                     "Vault Not Claimable Yet"
                   ) : (

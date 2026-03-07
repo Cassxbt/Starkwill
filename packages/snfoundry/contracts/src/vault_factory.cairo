@@ -12,6 +12,8 @@ trait IVaultFactory<TContractState> {
         guardian_2: ContractAddress,
         guardian_3: ContractAddress,
     ) -> ContractAddress;
+
+    fn get_vault_for_owner(self: @TContractState, owner: ContractAddress) -> ContractAddress;
 }
 
 #[starknet::contract]
@@ -19,6 +21,8 @@ mod vault_factory {
     use super::{ContractAddress, get_caller_address};
     use starknet::ClassHash;
     use starknet::storage::{
+        Map,
+        StoragePathEntry,
         StoragePointerReadAccess,
         StoragePointerWriteAccess,
     };
@@ -26,10 +30,25 @@ mod vault_factory {
 
     use super::IVaultFactory;
 
+    #[event]
+    #[derive(Drop, starknet::Event)]
+    enum Event {
+        VaultCreated: VaultCreated,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct VaultCreated {
+        #[key]
+        owner: ContractAddress,
+        vault_address: ContractAddress,
+        vault_index: u64,
+    }
+
     #[storage]
     struct Storage {
         vault_class_hash: ClassHash,
         vault_count: u64,
+        owner_vault: Map<ContractAddress, ContractAddress>,
     }
 
     #[constructor]
@@ -70,7 +89,15 @@ mod vault_factory {
             .unwrap();
 
             self.vault_count.write(salt + 1);
+            self.owner_vault.entry(owner).write(addr);
+
+            self.emit(VaultCreated { owner, vault_address: addr, vault_index: salt });
+
             addr
+        }
+
+        fn get_vault_for_owner(self: @ContractState, owner: ContractAddress) -> ContractAddress {
+            self.owner_vault.entry(owner).read()
         }
     }
 }

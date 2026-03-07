@@ -1,18 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import type { Variants } from "framer-motion";
-import { useAccount } from "@starknet-react/core";
-import { useScaffoldReadContract } from "~~/hooks/scaffold-stark/useScaffoldReadContract";
-import { useScaffoldWriteContract } from "~~/hooks/scaffold-stark/useScaffoldWriteContract";
-import { useScaffoldEventHistory } from "~~/hooks/scaffold-stark/useScaffoldEventHistory";
-import {
-  ArrowPathIcon,
-} from "@heroicons/react/24/outline";
+import { useAccount, useProvider } from "@starknet-react/core";
+import { ArrowPathIcon } from "@heroicons/react/24/outline";
 import { useTransactor } from "~~/hooks/scaffold-stark";
+import { Contract as StarknetContract, CallData, cairo, hash } from "starknet";
 import { TOKENS, getTokenAddress } from "~~/utils/starkwill/tokens";
 import { TONGO_SUPPORTED_TOKENS } from "~~/utils/starkwill/tongo-constants";
+import { useVault, VAULT_ABI } from "~~/contexts/VaultContext";
+import { useVaultContract } from "~~/hooks/useVaultContract";
 
 const TOKEN_ADDR_TO_SYMBOL: Record<string, { symbol: string; decimals: number }> = {};
 for (const [symbol, info] of Object.entries(TOKENS)) {
@@ -51,60 +49,127 @@ const staggerItem: Variants = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] } },
 };
 
+const STORAGE_KEY_LAST_CHECKIN = hash.getSelectorFromName("last_checkin_ts");
+const STORAGE_KEY_CHECKIN_PERIOD = hash.getSelectorFromName("checkin_period_secs");
+const STORAGE_KEY_GRACE_PERIOD = hash.getSelectorFromName("grace_period_secs");
+
+function formatCountdown(totalSecs: number): string {
+  if (totalSecs <= 0) return "0m";
+  const days = Math.floor(totalSecs / 86400);
+  const hours = Math.floor((totalSecs % 86400) / 3600);
+  const mins = Math.floor((totalSecs % 3600) / 60);
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (mins > 0 || parts.length === 0) parts.push(`${mins}m`);
+  return parts.join(" ");
+}
+
+type CountdownPhase = "active" | "grace" | "claimable" | null;
+
 const Dashboard = () => {
   const { address, status } = useAccount();
   const shouldReduceMotion = useReducedMotion();
+  const { writeTransaction } = useTransactor();
+  const { vaultAddress, hasVault } = useVault();
+  const vaultContract = useVaultContract();
+
   const [depositToken, setDepositToken] = useState("STRK");
   const [depositAmount, setDepositAmount] = useState("");
   const [showDeposit, setShowDeposit] = useState(false);
+  const [isDepositing, setIsDepositing] = useState(false);
+  const [isCheckingIn, setIsCheckingIn] = useState(false);
 
-  // Tongo private deposit state
   const [privateMode, setPrivateMode] = useState(false);
   const [tongoKey, setTongoKey] = useState("");
-  const [tongoStep, setTongoStep] = useState<0 | 1 | 2>(0); // 0=idle, 1=funding, 2=withdrawing
+  const [tongoStep, setTongoStep] = useState<0 | 1 | 2>(0);
   const [tongoStatus, setTongoStatus] = useState("");
 
-  const { data: isClaimable } = useScaffoldReadContract({
-    contractName: "vault",
-    functionName: "is_claimable",
-    args: [],
-  });
+  const { provider } = useProvider();
 
-  const { data: heirMerkleRoot } = useScaffoldReadContract({
-    contractName: "vault",
-    functionName: "get_heir_merkle_root",
-    args: [],
-  });
+  const [isClaimable, setIsClaimable] = useState<boolean | null>(null);
+  const [heirMerkleRoot, setHeirMerkleRoot] = useState<string | null>(null);
+  const [verifierAddress, setVerifierAddress] = useState<string | null>(null);
 
-  const { data: verifierAddress } = useScaffoldReadContract({
-    contractName: "vault",
-    functionName: "get_verifier_address",
-    args: [],
-  });
+  const [lastCheckinTs, setLastCheckinTs] = useState<number | null>(null);
+  const [checkinPeriodSecs, setCheckinPeriodSecs] = useState<number | null>(null);
+  const [gracePeriodSecs, setGracePeriodSecs] = useState<number | null>(null);
+  const [countdownLabel, setCountdownLabel] = useState<string | null>(null);
+  const [countdownPhase, setCountdownPhase] = useState<CountdownPhase>(null);
 
-  const { sendAsync: checkIn, isPending: isCheckingIn } = useScaffoldWriteContract({
-    contractName: "vault",
-    functionName: "check_in",
-    args: [],
-  });
+  useEffect(() => {
+    if (!vaultContract) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [claimable, root, verifier] = await Promise.all([
+          vaultContract.call("is_claimable"),
+          vaultContract.call("get_heir_merkle_root"),
+          vaultContract.call("get_verifier_address"),
+        ]);
+        if (cancelled) return;
+        setIsClaimable(!!claimable);
+        const rootStr = typeof root === "bigint" ? root.toString() : String(root);
+        setHeirMerkleRoot(rootStr === "0" ? null : rootStr);
+        const verStr = typeof verifier === "bigint" ? verifier.toString() : String(verifier);
+        setVerifierAddress(verStr === "0" ? null : verStr);
+      } catch (e) {
+        console.error("Failed to read vault state:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [vaultContract]);
 
-  const { sendAsync: deposit, isPending: isDepositing } = useScaffoldWriteContract({
-    contractName: "vault",
-    functionName: "deposit",
-    args: [undefined, undefined],
-  });
+  useEffect(() => {
+    if (!vaultAddress || !provider) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [lastRaw, periodRaw, graceRaw] = await Promise.all([
+          (provider as any).getStorageAt(vaultAddress, STORAGE_KEY_LAST_CHECKIN),
+          (provider as any).getStorageAt(vaultAddress, STORAGE_KEY_CHECKIN_PERIOD),
+          (provider as any).getStorageAt(vaultAddress, STORAGE_KEY_GRACE_PERIOD),
+        ]);
+        if (cancelled) return;
+        setLastCheckinTs(Number(BigInt(lastRaw)));
+        setCheckinPeriodSecs(Number(BigInt(periodRaw)));
+        setGracePeriodSecs(Number(BigInt(graceRaw)));
+      } catch (e) {
+        console.error("Failed to read vault timing:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [vaultAddress, provider]);
 
-  const { writeTransaction } = useTransactor();
+  useEffect(() => {
+    if (lastCheckinTs == null || checkinPeriodSecs == null || gracePeriodSecs == null) return;
+    if (isClaimable) {
+      setCountdownLabel("Vault is claimable");
+      setCountdownPhase("claimable");
+      return;
+    }
 
-  const VAULT_ADDRESS = "0x656c5beb9d880efeb4a1f25a2fb030737c85b410c5fd83e55b9ff370c0c8673";
+    const tick = () => {
+      const now = Math.floor(Date.now() / 1000);
+      const deadline = lastCheckinTs + checkinPeriodSecs;
+      const graceEnd = deadline + gracePeriodSecs;
 
-  const { data: claimEvents, isLoading: eventsLoading } = useScaffoldEventHistory({
-    contractName: "vault",
-    eventName: "ZKClaim",
-    fromBlock: 0n,
-    blockData: true,
-    watch: false,
-  });
+      if (now < deadline) {
+        setCountdownLabel(`Check-in due in ${formatCountdown(deadline - now)}`);
+        setCountdownPhase("active");
+      } else if (now < graceEnd) {
+        setCountdownLabel(`Grace period: ${formatCountdown(graceEnd - now)} remaining`);
+        setCountdownPhase("grace");
+      } else {
+        setCountdownLabel("Vault is claimable");
+        setCountdownPhase("claimable");
+      }
+    };
+
+    tick();
+    const interval = setInterval(tick, 60_000);
+    return () => clearInterval(interval);
+  }, [lastCheckinTs, checkinPeriodSecs, gracePeriodSecs, isClaimable]);
 
   const mv = (v: Variants | undefined) => (shouldReduceMotion ? undefined : v);
 
@@ -130,30 +195,78 @@ const Dashboard = () => {
     );
   }
 
+  if (!hasVault) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] px-6">
+        <motion.div
+          variants={mv(fadeInUp)}
+          initial={shouldReduceMotion ? undefined : "hidden"}
+          animate="visible"
+          className="text-center"
+        >
+          <div className="w-16 h-16 bg-[var(--sw-surface)] border border-[var(--sw-border)] flex items-center justify-center mx-auto mb-6">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-emerald-400">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          </div>
+          <h2 className="text-2xl font-bold mb-3 tracking-tight text-[var(--sw-text)]">No Vault Found</h2>
+          <p className="text-[var(--sw-text-secondary)] text-sm mb-6">Create an inheritance vault to get started.</p>
+          <a
+            href="/create"
+            className="inline-flex px-6 py-2.5 font-medium text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 transition-colors"
+          >
+            Create Vault
+          </a>
+        </motion.div>
+      </div>
+    );
+  }
+
   const handleCheckIn = async () => {
+    if (!vaultContract) return;
+    setIsCheckingIn(true);
     try {
-      await checkIn();
+      const call = new StarknetContract({ abi: VAULT_ABI as any, address: vaultAddress! }).populate("check_in", []);
+      await writeTransaction([call]);
     } catch (e) {
       console.error("Check-in failed:", e);
+    } finally {
+      setIsCheckingIn(false);
     }
   };
 
   const handleDeposit = async () => {
-    if (!depositAmount || parseFloat(depositAmount) <= 0) return;
+    if (!depositAmount || parseFloat(depositAmount) <= 0 || !vaultAddress) return;
+    setIsDepositing(true);
     try {
       const tokenAddr = getTokenAddress(depositToken);
       const token = TOKENS[depositToken];
       const amountWei = BigInt(Math.floor(parseFloat(depositAmount) * 10 ** token.decimals));
-      await deposit({ args: [tokenAddr, amountWei] });
+
+      const vault = new StarknetContract({ abi: VAULT_ABI as any, address: vaultAddress });
+      const approveCall = {
+        contractAddress: tokenAddr,
+        entrypoint: "approve",
+        calldata: CallData.compile({
+          spender: vaultAddress,
+          amount: cairo.uint256(amountWei),
+        }),
+      };
+      const depositCall = vault.populate("deposit", [tokenAddr, amountWei]);
+
+      await writeTransaction([approveCall, depositCall]);
       setDepositAmount("");
       setShowDeposit(false);
     } catch (e) {
       console.error("Deposit failed:", e);
+    } finally {
+      setIsDepositing(false);
     }
   };
 
   const handleTongoDeposit = async () => {
-    if (!depositAmount || parseFloat(depositAmount) <= 0 || !tongoKey || !address) return;
+    if (!depositAmount || parseFloat(depositAmount) <= 0 || !tongoKey || !address || !vaultAddress) return;
     try {
       const { buildFundCalls, buildWithdrawCalls } = await import("~~/utils/starkwill/tongo");
       const token = TOKENS[depositToken];
@@ -166,7 +279,7 @@ const Dashboard = () => {
 
       setTongoStep(2);
       setTongoStatus("Withdrawing to vault...");
-      const withdrawCalls = await buildWithdrawCalls(tongoKey, depositToken, amountWei, VAULT_ADDRESS, address);
+      const withdrawCalls = await buildWithdrawCalls(tongoKey, depositToken, amountWei, vaultAddress, address);
       await writeTransaction(withdrawCalls);
 
       setTongoStatus("Private deposit complete!");
@@ -183,12 +296,11 @@ const Dashboard = () => {
     }
   };
 
-  const hasVerifier = verifierAddress && verifierAddress.toString() !== "0";
-  const hasRoot = heirMerkleRoot && heirMerkleRoot.toString() !== "0";
+  const hasVerifier = !!verifierAddress;
+  const hasRoot = !!heirMerkleRoot;
 
   return (
     <div className="flex flex-col items-center min-h-screen px-6 pt-10 pb-24">
-      {/* Header */}
       <motion.div
         variants={mv(fadeInUp)}
         initial={shouldReduceMotion ? undefined : "hidden"}
@@ -199,7 +311,7 @@ const Dashboard = () => {
           Vault Dashboard
         </h1>
         <p className="text-[var(--sw-text-tertiary)] font-mono-code text-xs">
-          {address?.slice(0, 12)}...{address?.slice(-8)}
+          {vaultAddress?.slice(0, 12)}...{vaultAddress?.slice(-8)}
         </p>
       </motion.div>
 
@@ -209,7 +321,7 @@ const Dashboard = () => {
         animate="visible"
         className="w-full max-w-3xl space-y-5"
       >
-        {/* ── Proof of Life Card ── */}
+        {/* Proof of Life */}
         <motion.div
           variants={mv(staggerItem)}
           className={`p-6 bg-[var(--sw-surface)] border ${
@@ -235,6 +347,15 @@ const Dashboard = () => {
                     {isClaimable ? "Vault Unlocked" : "Vault Active"}
                   </span>
                 </div>
+                {countdownLabel && (
+                  <p className={`text-[11px] mt-1.5 ${
+                    countdownPhase === "grace" ? "text-amber-400" :
+                    countdownPhase === "claimable" ? "text-red-400" :
+                    "text-[var(--sw-text-tertiary)]"
+                  }`}>
+                    {countdownLabel}
+                  </p>
+                )}
               </div>
             </div>
             <button
@@ -252,9 +373,12 @@ const Dashboard = () => {
               Check In
             </button>
           </div>
+          <p className="text-[11px] text-[var(--sw-text-placeholder)] mt-3">
+            Your wallet may prompt twice (estimate + confirm). This is normal.
+          </p>
         </motion.div>
 
-        {/* ── Status Grid ── */}
+        {/* Status Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {[
             {
@@ -310,7 +434,7 @@ const Dashboard = () => {
           ))}
         </div>
 
-        {/* ── Deposit Section ── */}
+        {/* Deposit Section */}
         <motion.div
           variants={mv(staggerItem)}
           className="p-6 bg-[var(--sw-surface)] border border-[var(--sw-border)]"
@@ -345,7 +469,6 @@ const Dashboard = () => {
                 transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
                 className="space-y-4 overflow-hidden"
               >
-                {/* Mode Toggle */}
                 <div className="flex gap-2">
                   <button
                     onClick={() => setPrivateMode(false)}
@@ -360,7 +483,6 @@ const Dashboard = () => {
                   <button
                     onClick={() => {
                       setPrivateMode(true);
-                      // Switch to a Tongo-supported token if current isn't
                       if (!TONGO_SUPPORTED_TOKENS.includes(depositToken)) {
                         setDepositToken("STRK");
                       }
@@ -375,7 +497,6 @@ const Dashboard = () => {
                   </button>
                 </div>
 
-                {/* Token Selector */}
                 <div className="flex gap-2">
                   {(privateMode ? TONGO_SUPPORTED_TOKENS : Object.keys(TOKENS)).map((symbol) => (
                     <button
@@ -392,18 +513,35 @@ const Dashboard = () => {
                   ))}
                 </div>
 
-                {/* Tongo Private Key (only in private mode) */}
                 {privateMode && (
-                  <input
-                    type="password"
-                    value={tongoKey}
-                    onChange={(e) => setTongoKey(e.target.value)}
-                    placeholder="Tongo private key"
-                    className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-purple-500/40 transition-colors font-mono-code"
-                  />
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        type="password"
+                        value={tongoKey}
+                        onChange={(e) => setTongoKey(e.target.value)}
+                        placeholder="Tongo private key"
+                        className="flex-1 px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-purple-500/40 transition-colors font-mono-code"
+                      />
+                      <button
+                        onClick={() => {
+                          const rand = crypto.getRandomValues(new Uint8Array(31));
+                          const hex = "0x" + Array.from(rand).map(b => b.toString(16).padStart(2, "0")).join("");
+                          setTongoKey(hex);
+                        }}
+                        className="px-3 py-2.5 text-xs font-medium border border-purple-500/20 text-purple-400 hover:bg-purple-500/10 transition-all whitespace-nowrap"
+                      >
+                        Generate
+                      </button>
+                    </div>
+                    {tongoKey && tongoKey.startsWith("0x") && tongoKey.length > 20 && (
+                      <p className="text-[11px] text-amber-400">
+                        Save this key securely. It cannot be recovered.
+                      </p>
+                    )}
+                  </div>
                 )}
 
-                {/* Amount Input + Action */}
                 <div className="flex gap-3">
                   <input
                     type="number"
@@ -441,13 +579,12 @@ const Dashboard = () => {
                   )}
                 </div>
 
-                {/* Tongo Step Progress */}
                 {privateMode && tongoStep > 0 && (
                   <div className="space-y-2 pt-1">
                     <div className="flex items-center gap-2">
                       <span className={`inline-flex h-2 w-2 rounded-full ${tongoStep >= 1 ? "bg-purple-400" : "bg-[var(--sw-border)]"}`} />
                       <span className={`text-xs font-medium ${tongoStep === 1 ? "text-purple-400" : tongoStep > 1 ? "text-emerald-400" : "text-[var(--sw-text-tertiary)]"}`}>
-                        Step 1: Fund Tongo {tongoStep > 1 && "✓"}
+                        Step 1: Fund Tongo {tongoStep > 1 && "\u2713"}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -459,7 +596,6 @@ const Dashboard = () => {
                   </div>
                 )}
 
-                {/* Status Message */}
                 {privateMode && tongoStatus && (
                   <p className={`text-[11px] ${tongoStatus.startsWith("Failed") ? "text-red-400" : tongoStatus.includes("complete") ? "text-emerald-400" : "text-purple-400"}`}>
                     {tongoStatus}
@@ -468,8 +604,8 @@ const Dashboard = () => {
 
                 <p className="text-[11px] text-[var(--sw-text-placeholder)]">
                   {privateMode
-                    ? "Private deposits route through Tongo for confidential on-chain transfers. Your Tongo key is never stored."
-                    : "You must first approve the vault contract to spend your tokens (ERC20 approve)."}
+                    ? "Private deposits route through Tongo for confidential on-chain transfers."
+                    : "Approve and deposit are batched into a single transaction."}
                 </p>
               </motion.div>
             )}
@@ -482,7 +618,7 @@ const Dashboard = () => {
           )}
         </motion.div>
 
-        {/* ── Quick Actions ── */}
+        {/* Quick Actions */}
         <motion.div
           variants={mv(staggerItem)}
           className="p-6 bg-[var(--sw-surface)] border border-[var(--sw-border)]"
@@ -490,10 +626,8 @@ const Dashboard = () => {
           <h3 className="font-semibold text-base mb-5 tracking-tight text-[var(--sw-text)]">Quick Actions</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {[
-              { label: "Set Heir Merkle Root", href: "/create", icon: "M12 2L2 7l10 5 10-5-10-5z" },
-              { label: "Set Verifier Address", href: null, icon: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" },
+              { label: "Configure Vault", href: "/create", icon: "M12 2L2 7l10 5 10-5-10-5z" },
               { label: "Deposit Assets", href: null, onClick: () => setShowDeposit(true), icon: "M12 2v20M17 7H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" },
-              { label: "Whitelist Token", href: null, icon: "M9 12l2 2 4-4M20 12a8 8 0 1 1-16 0 8 8 0 0 1 16 0z" },
             ].map((action) => {
               const Wrapper = action.href ? "a" : "button";
               return (
@@ -511,84 +645,6 @@ const Dashboard = () => {
               );
             })}
           </div>
-        </motion.div>
-
-        {/* ── Recent Claim Activity ── */}
-        <motion.div
-          variants={mv(staggerItem)}
-          className="p-6 bg-[var(--sw-surface)] border border-[var(--sw-border)]"
-        >
-          <div className="flex items-center gap-3 mb-5">
-            <div className="w-10 h-10 bg-emerald-500/10 flex items-center justify-center">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-emerald-400">
-                <path d="M12 8v4l3 3" />
-                <circle cx="12" cy="12" r="10" />
-              </svg>
-            </div>
-            <h3 className="font-semibold text-base tracking-tight text-[var(--sw-text)]">Recent Activity</h3>
-          </div>
-
-          {eventsLoading ? (
-            <div className="flex items-center gap-2 py-4">
-              <ArrowPathIcon className="h-4 w-4 animate-spin text-[var(--sw-text-tertiary)]" />
-              <span className="text-sm text-[var(--sw-text-tertiary)]">Loading events...</span>
-            </div>
-          ) : !claimEvents || claimEvents.length === 0 ? (
-            <p className="text-sm text-[var(--sw-text-tertiary)] py-2">
-              No claims yet. Heir claims will appear here after successful ZK proof verification.
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {claimEvents.slice(0, 10).map((event: any, i: number) => {
-                const args = event.parsedArgs || event.args || {};
-                const tokenAddr = String(args.token || "");
-                const tokenInfo = resolveToken(tokenAddr);
-                const amount = args.amount != null ? formatAmount(args.amount, tokenInfo.decimals) : "?";
-                const weightBps = args.weight_bps != null ? Number(args.weight_bps) / 100 : null;
-                const nullifier = String(args.nullifier_hash || "");
-                const txHash = event.log?.transaction_hash || "";
-                const blockTs = event.block?.timestamp;
-                const timeStr = blockTs ? new Date(Number(blockTs) * 1000).toLocaleString() : "—";
-
-                return (
-                  <div
-                    key={txHash + i}
-                    className="flex items-center justify-between gap-4 px-4 py-3 border border-[var(--sw-border-light)] bg-[var(--sw-bg-faint)]"
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                        <span className="text-sm font-medium text-[var(--sw-text)]">
-                          {amount} {tokenInfo.symbol}
-                        </span>
-                        {weightBps != null && (
-                          <span className="text-[10px] px-1.5 py-0.5 bg-emerald-500/10 text-emerald-400 font-medium">
-                            {weightBps}%
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-[var(--sw-text-tertiary)] mt-1 font-mono-code truncate">
-                        Nullifier: {nullifier.slice(0, 12)}...{nullifier.slice(-6)}
-                      </p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-[11px] text-[var(--sw-text-tertiary)]">{timeStr}</p>
-                      {txHash && (
-                        <a
-                          href={`https://sepolia.starkscan.co/tx/${txHash}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[10px] text-emerald-400 hover:underline font-mono-code"
-                        >
-                          {txHash.slice(0, 8)}...{txHash.slice(-4)}
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </motion.div>
       </motion.div>
     </div>

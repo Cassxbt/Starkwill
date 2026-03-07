@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import type { Variants } from "framer-motion";
 import { useAccount } from "@starknet-react/core";
-import { useScaffoldReadContract } from "~~/hooks/scaffold-stark/useScaffoldReadContract";
-import { useScaffoldWriteContract } from "~~/hooks/scaffold-stark/useScaffoldWriteContract";
+import { useTransactor } from "~~/hooks/scaffold-stark";
+import { Contract as StarknetContract } from "starknet";
 import { ArrowPathIcon, CheckCircleIcon, XCircleIcon } from "@heroicons/react/24/outline";
+import { useVault, VAULT_ABI } from "~~/contexts/VaultContext";
+import { useVaultContract } from "~~/hooks/useVaultContract";
 
 const fadeInUp: Variants = {
   hidden: { opacity: 0, y: 24 },
@@ -28,20 +30,33 @@ type ApprovalStatus = "idle" | "submitting" | "success" | "error";
 const GuardianPage = () => {
   const { address, status } = useAccount();
   const shouldReduceMotion = useReducedMotion();
+  const { writeTransaction } = useTransactor();
+  const { vaultAddress, hasVault } = useVault();
+  const vaultContract = useVaultContract();
+
+  const [manualVaultAddr, setManualVaultAddr] = useState("");
   const [approvalStatus, setApprovalStatus] = useState<ApprovalStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
+  const [isClaimable, setIsClaimable] = useState<boolean | null>(null);
 
-  const { data: isClaimable } = useScaffoldReadContract({
-    contractName: "vault",
-    functionName: "is_claimable",
-    args: [],
-  });
+  const targetVaultAddr = hasVault ? vaultAddress : (manualVaultAddr.startsWith("0x") && manualVaultAddr.length > 10 ? manualVaultAddr : null);
 
-  const { sendAsync: guardianApprove, isPending: isApproving } = useScaffoldWriteContract({
-    contractName: "vault",
-    functionName: "guardian_approve_unlock",
-    args: [],
-  });
+  useEffect(() => {
+    if (!targetVaultAddr) { setIsClaimable(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { RpcProvider } = await import("starknet");
+        const provider = new RpcProvider({ nodeUrl: process.env.NEXT_PUBLIC_SEPOLIA_PROVIDER_URL || "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/_hKu4IgnPgrF8O82GLuYU" });
+        const contract = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddr, providerOrAccount: provider });
+        const result = await contract.call("is_claimable");
+        if (!cancelled) setIsClaimable(!!result);
+      } catch {
+        if (!cancelled) setIsClaimable(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [targetVaultAddr]);
 
   const mv = (v: Variants | undefined) => (shouldReduceMotion ? undefined : v);
 
@@ -67,10 +82,13 @@ const GuardianPage = () => {
   }
 
   const handleApprove = async () => {
+    if (!targetVaultAddr) return;
     setApprovalStatus("submitting");
     setErrorMessage("");
     try {
-      await guardianApprove();
+      const vault = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddr });
+      const call = vault.populate("guardian_approve_unlock", []);
+      await writeTransaction([call]);
       setApprovalStatus("success");
     } catch (e: any) {
       console.error("Guardian approval failed:", e);
@@ -86,7 +104,6 @@ const GuardianPage = () => {
 
   return (
     <div className="flex flex-col items-center min-h-screen px-6 pt-10 pb-24">
-      {/* Header */}
       <motion.div
         variants={mv(fadeInUp)}
         initial={shouldReduceMotion ? undefined : "hidden"}
@@ -107,37 +124,59 @@ const GuardianPage = () => {
         animate="visible"
         className="w-full max-w-xl space-y-5"
       >
+        {/* Vault Address (manual entry for guardians) */}
+        {!hasVault && (
+          <motion.div
+            variants={mv(staggerItem)}
+            className="p-6 bg-[var(--sw-surface)] border border-[var(--sw-border)]"
+          >
+            <label className="text-xs text-[var(--sw-text-secondary)] block mb-1.5 font-medium">Vault Address</label>
+            <input
+              type="text"
+              value={manualVaultAddr}
+              onChange={(e) => setManualVaultAddr(e.target.value)}
+              placeholder="0x... (vault to unlock)"
+              className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] font-mono-code placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
+            />
+            <p className="text-[11px] text-[var(--sw-text-placeholder)] mt-1.5">
+              Enter the address of the vault you are a guardian for.
+            </p>
+          </motion.div>
+        )}
+
         {/* Vault Status */}
-        <motion.div
-          variants={mv(staggerItem)}
-          className={`p-6 bg-[var(--sw-surface)] border ${
-            isClaimable ? "border-emerald-500/20" : "border-[var(--sw-border)]"
-          }`}
-        >
-          <div className="flex items-center gap-4">
-            <div className={`w-12 h-12 flex items-center justify-center ${
-              isClaimable ? "bg-emerald-500/10" : "bg-amber-500/10"
-            }`}>
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={isClaimable ? "text-emerald-400" : "text-amber-400"}>
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                {isClaimable ? (
-                  <path d="M7 11V7a5 5 0 0 1 9.9-1" />
-                ) : (
-                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                )}
-              </svg>
-            </div>
-            <div>
-              <h3 className="font-semibold text-base tracking-tight text-[var(--sw-text)]">Vault Status</h3>
-              <div className="flex items-center gap-2 mt-1">
-                <span className={`inline-flex h-1.5 w-1.5 rounded-full ${isClaimable ? "bg-emerald-400" : "bg-amber-400"}`} />
-                <span className={`text-xs font-medium ${isClaimable ? "text-emerald-400" : "text-amber-400"}`}>
-                  {isClaimable ? "Unlocked — Heirs Can Claim" : "Locked"}
-                </span>
+        {targetVaultAddr && (
+          <motion.div
+            variants={mv(staggerItem)}
+            className={`p-6 bg-[var(--sw-surface)] border ${
+              isClaimable ? "border-emerald-500/20" : "border-[var(--sw-border)]"
+            }`}
+          >
+            <div className="flex items-center gap-4">
+              <div className={`w-12 h-12 flex items-center justify-center ${
+                isClaimable ? "bg-emerald-500/10" : "bg-amber-500/10"
+              }`}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={isClaimable ? "text-emerald-400" : "text-amber-400"}>
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                  {isClaimable ? (
+                    <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+                  ) : (
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  )}
+                </svg>
+              </div>
+              <div>
+                <h3 className="font-semibold text-base tracking-tight text-[var(--sw-text)]">Vault Status</h3>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={`inline-flex h-1.5 w-1.5 rounded-full ${isClaimable ? "bg-emerald-400" : "bg-amber-400"}`} />
+                  <span className={`text-xs font-medium ${isClaimable ? "text-emerald-400" : "text-amber-400"}`}>
+                    {isClaimable ? "Unlocked \u2014 Heirs Can Claim" : "Locked"}
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
-        </motion.div>
+          </motion.div>
+        )}
 
         {/* How It Works */}
         <motion.div
@@ -215,14 +254,16 @@ const GuardianPage = () => {
               </div>
               <button
                 onClick={handleApprove}
-                disabled={isApproving || !!isClaimable}
+                disabled={approvalStatus === "submitting" || !!isClaimable || !targetVaultAddr}
                 className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 font-medium text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 disabled:opacity-40 transition-colors"
               >
-                {isApproving ? (
+                {approvalStatus === "submitting" ? (
                   <>
                     <ArrowPathIcon className="h-4 w-4 animate-spin" />
                     Submitting...
                   </>
+                ) : !targetVaultAddr ? (
+                  "Enter Vault Address"
                 ) : isClaimable ? (
                   "Vault Already Unlocked"
                 ) : (

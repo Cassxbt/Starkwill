@@ -5,240 +5,67 @@
 
 const deployedContracts = {
   sepolia: {
-    vault: {
+    vault_factory: {
       address:
-        "0x656c5beb9d880efeb4a1f25a2fb030737c85b410c5fd83e55b9ff370c0c8673",
+        "0x7f842398b9c105fa609a80957195a011aff4e7506a8475cb66e555bf4c7c9a8",
       abi: [
         {
           type: "impl",
-          name: "VaultExternal",
-          interface_name: "starkwill::vault::IVault",
-        },
-        {
-          type: "enum",
-          name: "core::bool",
-          variants: [
-            {
-              name: "False",
-              type: "()",
-            },
-            {
-              name: "True",
-              type: "()",
-            },
-          ],
-        },
-        {
-          type: "struct",
-          name: "core::integer::u256",
-          members: [
-            {
-              name: "low",
-              type: "core::integer::u128",
-            },
-            {
-              name: "high",
-              type: "core::integer::u128",
-            },
-          ],
-        },
-        {
-          type: "struct",
-          name: "core::array::Span::<core::felt252>",
-          members: [
-            {
-              name: "snapshot",
-              type: "@core::array::Array::<core::felt252>",
-            },
-          ],
+          name: "FactoryExternal",
+          interface_name: "starkwill::vault_factory::IVaultFactory",
         },
         {
           type: "interface",
-          name: "starkwill::vault::IVault",
+          name: "starkwill::vault_factory::IVaultFactory",
           items: [
             {
               type: "function",
-              name: "check_in",
-              inputs: [],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "add_heir",
+              name: "create_vault",
               inputs: [
                 {
-                  name: "heir",
-                  type: "core::starknet::contract_address::ContractAddress",
-                },
-              ],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "whitelist_token",
-              inputs: [
-                {
-                  name: "token",
-                  type: "core::starknet::contract_address::ContractAddress",
+                  name: "checkin_period_secs",
+                  type: "core::integer::u64",
                 },
                 {
-                  name: "allowed",
-                  type: "core::bool",
+                  name: "grace_period_secs",
+                  type: "core::integer::u64",
                 },
-              ],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "deposit",
-              inputs: [
                 {
-                  name: "token",
+                  name: "cancelable_until_ts",
+                  type: "core::integer::u64",
+                },
+                {
+                  name: "guardian_1",
                   type: "core::starknet::contract_address::ContractAddress",
                 },
                 {
-                  name: "amount",
-                  type: "core::integer::u256",
-                },
-              ],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "guardian_approve_unlock",
-              inputs: [],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "recover",
-              inputs: [
-                {
-                  name: "token",
+                  name: "guardian_2",
                   type: "core::starknet::contract_address::ContractAddress",
                 },
                 {
-                  name: "to",
-                  type: "core::starknet::contract_address::ContractAddress",
-                },
-                {
-                  name: "amount",
-                  type: "core::integer::u256",
-                },
-              ],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "claim",
-              inputs: [
-                {
-                  name: "token",
-                  type: "core::starknet::contract_address::ContractAddress",
-                },
-                {
-                  name: "to",
-                  type: "core::starknet::contract_address::ContractAddress",
-                },
-                {
-                  name: "amount",
-                  type: "core::integer::u256",
-                },
-              ],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "claim_with_proof",
-              inputs: [
-                {
-                  name: "full_proof_with_hints",
-                  type: "core::array::Span::<core::felt252>",
-                },
-                {
-                  name: "token",
+                  name: "guardian_3",
                   type: "core::starknet::contract_address::ContractAddress",
                 },
               ],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "set_verifier_address",
-              inputs: [
-                {
-                  name: "verifier",
-                  type: "core::starknet::contract_address::ContractAddress",
-                },
-              ],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "set_heir_merkle_root",
-              inputs: [
-                {
-                  name: "root",
-                  type: "core::felt252",
-                },
-              ],
-              outputs: [],
-              state_mutability: "external",
-            },
-            {
-              type: "function",
-              name: "is_claimable",
-              inputs: [],
-              outputs: [
-                {
-                  type: "core::bool",
-                },
-              ],
-              state_mutability: "view",
-            },
-            {
-              type: "function",
-              name: "get_heir_merkle_root",
-              inputs: [],
-              outputs: [
-                {
-                  type: "core::felt252",
-                },
-              ],
-              state_mutability: "view",
-            },
-            {
-              type: "function",
-              name: "get_verifier_address",
-              inputs: [],
               outputs: [
                 {
                   type: "core::starknet::contract_address::ContractAddress",
                 },
               ],
-              state_mutability: "view",
+              state_mutability: "external",
             },
             {
               type: "function",
-              name: "is_nullifier_used",
+              name: "get_vault_for_owner",
               inputs: [
                 {
-                  name: "nullifier",
-                  type: "core::felt252",
+                  name: "owner",
+                  type: "core::starknet::contract_address::ContractAddress",
                 },
               ],
               outputs: [
                 {
-                  type: "core::bool",
+                  type: "core::starknet::contract_address::ContractAddress",
                 },
               ],
               state_mutability: "view",
@@ -250,77 +77,48 @@ const deployedContracts = {
           name: "constructor",
           inputs: [
             {
-              name: "owner",
-              type: "core::starknet::contract_address::ContractAddress",
-            },
-            {
-              name: "checkin_period_secs",
-              type: "core::integer::u64",
-            },
-            {
-              name: "grace_period_secs",
-              type: "core::integer::u64",
-            },
-            {
-              name: "cancelable_until_ts",
-              type: "core::integer::u64",
-            },
-            {
-              name: "guardian_1",
-              type: "core::starknet::contract_address::ContractAddress",
-            },
-            {
-              name: "guardian_2",
-              type: "core::starknet::contract_address::ContractAddress",
-            },
-            {
-              name: "guardian_3",
-              type: "core::starknet::contract_address::ContractAddress",
+              name: "vault_class_hash",
+              type: "core::starknet::class_hash::ClassHash",
             },
           ],
         },
         {
           type: "event",
-          name: "starkwill::vault::vault::ZKClaim",
+          name: "starkwill::vault_factory::vault_factory::VaultCreated",
           kind: "struct",
           members: [
             {
-              name: "nullifier_hash",
-              type: "core::felt252",
-              kind: "data",
+              name: "owner",
+              type: "core::starknet::contract_address::ContractAddress",
+              kind: "key",
             },
             {
-              name: "token",
+              name: "vault_address",
               type: "core::starknet::contract_address::ContractAddress",
               kind: "data",
             },
             {
-              name: "amount",
-              type: "core::integer::u256",
-              kind: "data",
-            },
-            {
-              name: "weight_bps",
-              type: "core::integer::u256",
+              name: "vault_index",
+              type: "core::integer::u64",
               kind: "data",
             },
           ],
         },
         {
           type: "event",
-          name: "starkwill::vault::vault::Event",
+          name: "starkwill::vault_factory::vault_factory::Event",
           kind: "enum",
           variants: [
             {
-              name: "ZKClaim",
-              type: "starkwill::vault::vault::ZKClaim",
+              name: "VaultCreated",
+              type: "starkwill::vault_factory::vault_factory::VaultCreated",
               kind: "nested",
             },
           ],
         },
       ],
       classHash:
-        "0x6c31f8391d18439ce128c3a5ac10e88ceabbb8c44290fd4527f07ce1062629a",
+        "0x36d359897e2fd87270ac99fc8f910c60f4a3ce509f33901cf5ed56e3769a9a3",
     },
   },
 } as const;

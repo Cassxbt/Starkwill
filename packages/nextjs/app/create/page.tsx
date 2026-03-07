@@ -1,14 +1,65 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import type { Variants } from "framer-motion";
-import { useAccount } from "@starknet-react/core";
-import { useScaffoldWriteContract } from "~~/hooks/scaffold-stark/useScaffoldWriteContract";
-import { useScaffoldReadContract } from "~~/hooks/scaffold-stark/useScaffoldReadContract";
+import { useAccount, useProvider } from "@starknet-react/core";
+import { useTransactor } from "~~/hooks/scaffold-stark";
+import { Contract as StarknetContract } from "starknet";
 import { ArrowPathIcon } from "@heroicons/react/24/outline";
 import { computeCommitment, buildMerkleTree, toHex } from "~~/utils/starkwill/merkle";
 import { TOKENS, getTokenAddress } from "~~/utils/starkwill/tokens";
+import { VERIFIER_ADDRESS } from "~~/utils/starkwill/constants";
+import { useVault, VAULT_ABI } from "~~/contexts/VaultContext";
+import { useVaultContract } from "~~/hooks/useVaultContract";
+
+const FACTORY_ABI = [
+  {
+    type: "interface",
+    name: "starkwill::vault_factory::IVaultFactory",
+    items: [
+      {
+        type: "function",
+        name: "create_vault",
+        inputs: [
+          { name: "checkin_period_secs", type: "core::integer::u64" },
+          { name: "grace_period_secs", type: "core::integer::u64" },
+          { name: "cancelable_until_ts", type: "core::integer::u64" },
+          { name: "guardian_1", type: "core::starknet::contract_address::ContractAddress" },
+          { name: "guardian_2", type: "core::starknet::contract_address::ContractAddress" },
+          { name: "guardian_3", type: "core::starknet::contract_address::ContractAddress" },
+        ],
+        outputs: [{ type: "core::starknet::contract_address::ContractAddress" }],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "get_vault_for_owner",
+        inputs: [{ name: "owner", type: "core::starknet::contract_address::ContractAddress" }],
+        outputs: [{ type: "core::starknet::contract_address::ContractAddress" }],
+        state_mutability: "view",
+      },
+    ],
+  },
+  {
+    type: "event",
+    name: "starkwill::vault_factory::vault_factory::VaultCreated",
+    kind: "struct",
+    members: [
+      { name: "owner", type: "core::starknet::contract_address::ContractAddress", kind: "key" },
+      { name: "vault_address", type: "core::starknet::contract_address::ContractAddress", kind: "data" },
+      { name: "vault_index", type: "core::integer::u64", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "starkwill::vault_factory::vault_factory::Event",
+    kind: "enum",
+    variants: [
+      { name: "VaultCreated", type: "starkwill::vault_factory::vault_factory::VaultCreated", kind: "nested" },
+    ],
+  },
+] as const;
 
 const fadeInUp: Variants = {
   hidden: { opacity: 0, y: 24 },
@@ -20,37 +71,39 @@ const slideIn: Variants = {
   visible: { opacity: 1, x: 0, transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] } },
 };
 
+type SetupStatus = "idle" | "deploying" | "configuring" | "success" | "error";
+
 const CreateVault = () => {
   const { address, status } = useAccount();
+  const { provider } = useProvider();
   const shouldReduceMotion = useReducedMotion();
+  const { writeTransaction } = useTransactor();
+  const { vaultAddress, setVaultAddress, hasVault, factoryAddress } = useVault();
+  const vaultContract = useVaultContract();
+
   const [checkinDays, setCheckinDays] = useState("30");
   const [graceDays, setGraceDays] = useState("7");
   const [guardians, setGuardians] = useState(["", "", ""]);
   const [heirSecrets, setHeirSecrets] = useState<string[]>([""]);
   const [heirWeights, setHeirWeights] = useState<string[]>(["100"]);
   const [step, setStep] = useState(0);
-  const [setupStatus, setSetupStatus] = useState<"idle" | "computing" | "submitting" | "success" | "error">("idle");
+  const [setupStatus, setSetupStatus] = useState<SetupStatus>("idle");
   const [errorMsg, setErrorMsg] = useState("");
-  const [computedRoot, setComputedRoot] = useState("");
   const [tokensToWhitelist, setTokensToWhitelist] = useState<string[]>(["ETH", "STRK"]);
+  const [existingRoot, setExistingRoot] = useState<string | null>(null);
 
-  const { data: currentRoot } = useScaffoldReadContract({
-    contractName: "vault",
-    functionName: "get_heir_merkle_root",
-    args: [],
-  });
-
-  const { sendAsync: setHeirMerkleRoot, isPending: isSettingRoot } = useScaffoldWriteContract({
-    contractName: "vault",
-    functionName: "set_heir_merkle_root",
-    args: [undefined],
-  });
-
-  const { sendAsync: whitelistToken, isPending: isWhitelisting } = useScaffoldWriteContract({
-    contractName: "vault",
-    functionName: "whitelist_token",
-    args: [undefined, undefined],
-  });
+  useEffect(() => {
+    if (!vaultContract) { setExistingRoot(null); return; }
+    (async () => {
+      try {
+        const root = await vaultContract.call("get_heir_merkle_root");
+        const rootStr = typeof root === "bigint" ? "0x" + root.toString(16) : String(root);
+        setExistingRoot(/^0x0*$/.test(rootStr) ? null : rootStr);
+      } catch {
+        setExistingRoot(null);
+      }
+    })();
+  }, [vaultContract]);
 
   const mv = (v: Variants | undefined) => (shouldReduceMotion ? undefined : v);
 
@@ -99,7 +152,7 @@ const CreateVault = () => {
     try {
       const commitments = validPairs.map((p) => {
         const secret = BigInt(p.secret.startsWith("0x") ? p.secret : "0x" + p.secret);
-        const weightBps = BigInt(Math.round(parseFloat(p.weight) * 100)); // % → bps
+        const weightBps = BigInt(Math.round(parseFloat(p.weight) * 100));
         return computeCommitment(secret, weightBps);
       });
       const tree = buildMerkleTree(commitments);
@@ -111,16 +164,59 @@ const CreateVault = () => {
 
   const handleSetupVault = async () => {
     if (!merkleData) return;
-    setSetupStatus("computing");
+    setSetupStatus(hasVault ? "configuring" : "deploying");
     setErrorMsg("");
+
     try {
-      setSetupStatus("submitting");
-      await setHeirMerkleRoot({ args: [merkleData.rootHex] });
-      setComputedRoot(merkleData.rootHex);
-      for (const symbol of tokensToWhitelist) {
-        const tokenAddr = getTokenAddress(symbol);
-        await whitelistToken({ args: [tokenAddr, true] });
+      let targetVaultAddress = vaultAddress;
+
+      // Tx 1: Deploy via factory (skip if vault already exists)
+      if (!hasVault) {
+        if (!factoryAddress || !provider) {
+          throw new Error("Factory not available. Deploy the factory contract first.");
+        }
+
+        const factory = new StarknetContract({ abi: FACTORY_ABI as any, address: factoryAddress, providerOrAccount: provider });
+        const checkinSecs = Math.floor(parseFloat(checkinDays) * 86400);
+        const graceSecs = Math.floor(parseFloat(graceDays) * 86400);
+        const cancelableUntil = Math.floor(Date.now() / 1000) + 365 * 86400;
+
+        const deployCall = factory.populate("create_vault", [
+          checkinSecs, graceSecs, cancelableUntil,
+          guardians[0], guardians[1], guardians[2],
+        ]);
+
+        const txHash = await writeTransaction([deployCall]);
+        if (!txHash) throw new Error("Deploy transaction failed");
+
+        const receipt = await provider.waitForTransaction(txHash);
+        const factoryAddrBig = BigInt(factoryAddress);
+        const vaultEvent = (receipt as any).events?.find(
+          (e: any) => BigInt(e.from_address) === factoryAddrBig,
+        );
+
+        if (!vaultEvent?.data?.[0]) {
+          throw new Error("Could not find VaultCreated event in receipt");
+        }
+
+        targetVaultAddress = "0x" + BigInt(vaultEvent.data[0]).toString(16);
+        setVaultAddress(targetVaultAddress);
+        setSetupStatus("configuring");
       }
+
+      // Tx 2: Configure vault (set verifier + merkle root + whitelist tokens)
+      if (!targetVaultAddress) throw new Error("No vault address available");
+
+      const vault = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddress });
+      const configCalls = [
+        vault.populate("set_verifier_address", [VERIFIER_ADDRESS]),
+        vault.populate("set_heir_merkle_root", [merkleData.rootHex]),
+        ...tokensToWhitelist.map((sym) =>
+          vault.populate("whitelist_token", [getTokenAddress(sym), true]),
+        ),
+      ];
+
+      await writeTransaction(configCalls);
       setSetupStatus("success");
     } catch (e: any) {
       console.error("Vault setup failed:", e);
@@ -162,22 +258,35 @@ const CreateVault = () => {
         className="text-center mb-4"
       >
         <h1 className="text-3xl font-bold mb-2 tracking-tight text-[var(--sw-text)]">
-          Create Inheritance Vault
+          {hasVault ? "Configure Vault" : "Create Inheritance Vault"}
         </h1>
-        <p className="text-[var(--sw-text-secondary)] text-sm">Configure your dead-man&apos;s switch vault</p>
+        <p className="text-[var(--sw-text-secondary)] text-sm">
+          {hasVault
+            ? "Update your existing vault configuration"
+            : "Deploy and configure your dead-man\u2019s switch vault"}
+        </p>
       </motion.div>
 
-      {currentRoot && currentRoot.toString() !== "0" && (
+      {hasVault && (
         <motion.div
           initial={shouldReduceMotion ? undefined : { opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
-          className="mb-6 px-4 py-2 bg-emerald-500/8 border border-emerald-500/15 text-xs text-emerald-400 font-medium"
+          className="mb-4 px-4 py-2 bg-emerald-500/[0.08] border border-emerald-500/15 text-xs text-emerald-400 font-medium font-mono-code"
         >
-          Heir Merkle root already set on vault
+          Vault: {vaultAddress?.slice(0, 12)}...{vaultAddress?.slice(-8)}
         </motion.div>
       )}
 
-      {/* Step Indicator */}
+      {existingRoot && (
+        <motion.div
+          initial={shouldReduceMotion ? undefined : { opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="mb-6 px-4 py-2 bg-emerald-500/[0.08] border border-emerald-500/15 text-xs text-emerald-400 font-medium"
+        >
+          Heir fingerprint already set on vault
+        </motion.div>
+      )}
+
       <div className="flex gap-1.5 mb-10">
         {steps.map((label, i) => (
           <button
@@ -187,7 +296,7 @@ const CreateVault = () => {
               step === i
                 ? "text-[var(--sw-text-inverted)] bg-emerald-500"
                 : step > i
-                  ? "text-emerald-400/70 bg-emerald-500/8 border border-emerald-500/15"
+                  ? "text-emerald-400/70 bg-emerald-500/[0.08] border border-emerald-500/15"
                   : "text-[var(--sw-text-tertiary)] bg-[var(--sw-bg-faint)] border border-[var(--sw-border-faint)]"
             }`}
           >
@@ -210,16 +319,19 @@ const CreateVault = () => {
               <div className="p-6 bg-[var(--sw-surface)] border border-[var(--sw-border)]">
                 <div className="space-y-5">
                   <h3 className="font-semibold text-base tracking-tight text-[var(--sw-text)]">Vault Timing</h3>
-                  <p className="text-xs text-[var(--sw-text-tertiary)]">
-                    These are set at deployment time. Current vault uses the deploy script values.
-                  </p>
+                  {hasVault && (
+                    <p className="text-xs text-[var(--sw-text-tertiary)]">
+                      Timing parameters are fixed at deployment. These are for reference only.
+                    </p>
+                  )}
                   <div>
                     <label className="text-xs text-[var(--sw-text-secondary)] block mb-1.5 font-medium">Check-in Period (days)</label>
                     <input
                       type="number"
                       value={checkinDays}
                       onChange={(e) => setCheckinDays(e.target.value)}
-                      className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
+                      disabled={hasVault}
+                      className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors disabled:opacity-50"
                       min="1"
                     />
                     <p className="text-[11px] text-[var(--sw-text-placeholder)] mt-1.5">
@@ -232,7 +344,8 @@ const CreateVault = () => {
                       type="number"
                       value={graceDays}
                       onChange={(e) => setGraceDays(e.target.value)}
-                      className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
+                      disabled={hasVault}
+                      className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors disabled:opacity-50"
                       min="1"
                     />
                     <p className="text-[11px] text-[var(--sw-text-placeholder)] mt-1.5">
@@ -268,7 +381,7 @@ const CreateVault = () => {
                 onClick={() => setStep(1)}
                 className="w-full px-6 py-3 font-medium text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 transition-colors"
               >
-                Next: Add Guardians
+                Next: {hasVault ? "Review Guardians" : "Add Guardians"}
               </button>
             </motion.div>
           )}
@@ -297,14 +410,17 @@ const CreateVault = () => {
                         type="text"
                         value={g}
                         onChange={(e) => updateGuardian(i, e.target.value)}
+                        disabled={hasVault}
                         placeholder="0x..."
-                        className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] font-mono-code placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
+                        className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] font-mono-code placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors disabled:opacity-50"
                       />
                     </div>
                   ))}
-                  <p className="text-[11px] text-[var(--sw-text-placeholder)]">
-                    Guardians are set at deployment time via the deploy script.
-                  </p>
+                  {hasVault && (
+                    <p className="text-[11px] text-[var(--sw-text-placeholder)]">
+                      Guardians are fixed at deployment and cannot be changed.
+                    </p>
+                  )}
                 </div>
               </div>
               <div className="flex gap-3">
@@ -370,7 +486,6 @@ const CreateVault = () => {
                     </div>
                   ))}
 
-                  {/* Weight total indicator */}
                   <div className={`text-xs font-medium ${
                     Math.abs(totalWeight - 100) < 0.01
                       ? "text-emerald-400"
@@ -382,8 +497,11 @@ const CreateVault = () => {
 
                   {merkleData && (
                     <div className="p-4 bg-emerald-500/[0.06] border border-emerald-500/15 space-y-1.5">
-                      <p className="text-[11px] text-[var(--sw-text-secondary)] font-medium">Merkle Root ({merkleData.count} heir{merkleData.count !== 1 ? "s" : ""})</p>
+                      <p className="text-[11px] text-[var(--sw-text-secondary)] font-medium">Heir Fingerprint ({merkleData.count} heir{merkleData.count !== 1 ? "s" : ""})</p>
                       <p className="font-mono-code text-xs text-emerald-400/80 break-all">{merkleData.rootHex}</p>
+                      <p className="text-[11px] text-[var(--sw-text-tertiary)] mt-1">
+                        This fingerprint uniquely identifies your heirs. Stored on-chain but reveals nothing about individual identities.
+                      </p>
                     </div>
                   )}
                 </div>
@@ -432,16 +550,24 @@ const CreateVault = () => {
                   </div>
                   {merkleData && (
                     <div className="pt-3 border-t border-[var(--sw-border-faint)]">
-                      <p className="text-[11px] text-[var(--sw-text-tertiary)] mb-1.5">Merkle Root</p>
+                      <p className="text-[11px] text-[var(--sw-text-tertiary)] mb-1.5">Heir Fingerprint (Merkle Root)</p>
                       <p className="font-mono-code text-xs text-emerald-400/70 break-all">{merkleData.rootHex}</p>
+                      <p className="text-[11px] text-[var(--sw-text-tertiary)] mt-1">
+                        Uniquely identifies your heirs on-chain without revealing their identities.
+                      </p>
                     </div>
+                  )}
+
+                  {!hasVault && (
+                    <p className="text-[11px] text-[var(--sw-text-placeholder)] pt-2">
+                      This will require 2 wallet signatures: one to deploy the vault, one to configure it.
+                    </p>
                   )}
                 </div>
               </div>
 
-              {/* Status messages */}
               <AnimatePresence>
-                {setupStatus === "submitting" && (
+                {setupStatus === "deploying" && (
                   <motion.div
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -450,8 +576,23 @@ const CreateVault = () => {
                   >
                     <ArrowPathIcon className="h-4 w-4 animate-spin text-emerald-400" />
                     <div>
-                      <p className="text-sm font-medium text-zinc-200">Setting up vault...</p>
-                      <p className="text-[11px] text-[var(--sw-text-tertiary)]">Submitting Merkle root &amp; whitelisting tokens</p>
+                      <p className="text-sm font-medium text-zinc-200">Deploying vault...</p>
+                      <p className="text-[11px] text-[var(--sw-text-tertiary)]">Creating vault via factory (sign tx 1/2)</p>
+                    </div>
+                  </motion.div>
+                )}
+
+                {setupStatus === "configuring" && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    className="p-4 bg-emerald-500/[0.06] border border-emerald-500/15 flex items-center gap-3"
+                  >
+                    <ArrowPathIcon className="h-4 w-4 animate-spin text-emerald-400" />
+                    <div>
+                      <p className="text-sm font-medium text-zinc-200">Configuring vault...</p>
+                      <p className="text-[11px] text-[var(--sw-text-tertiary)]">Setting verifier, merkle root, and token whitelist{!hasVault && " (sign tx 2/2)"}</p>
                     </div>
                   </motion.div>
                 )}
@@ -466,8 +607,10 @@ const CreateVault = () => {
                       <path d="M20 6L9 17l-5-5" />
                     </svg>
                     <div>
-                      <p className="text-sm font-medium text-emerald-400">Vault configured!</p>
-                      <p className="text-[11px] text-[var(--sw-text-tertiary)]">Merkle root set, tokens whitelisted</p>
+                      <p className="text-sm font-medium text-emerald-400">Vault ready</p>
+                      <p className="text-[11px] text-[var(--sw-text-tertiary)]">
+                        {vaultAddress && `Deployed at ${vaultAddress.slice(0, 12)}...${vaultAddress.slice(-8)}`}
+                      </p>
                     </div>
                   </motion.div>
                 )}
@@ -496,15 +639,17 @@ const CreateVault = () => {
                 </button>
                 <button
                   onClick={handleSetupVault}
-                  disabled={!merkleData || setupStatus === "submitting" || isSettingRoot || isWhitelisting}
+                  disabled={!merkleData || setupStatus === "deploying" || setupStatus === "configuring"}
                   className="flex-1 px-6 py-3 font-medium text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 disabled:opacity-40 transition-colors"
                 >
-                  {isSettingRoot || isWhitelisting ? (
+                  {setupStatus === "deploying" || setupStatus === "configuring" ? (
                     <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
                   ) : setupStatus === "success" ? (
                     "Done"
-                  ) : (
+                  ) : hasVault ? (
                     "Configure Vault"
+                  ) : (
+                    "Deploy & Configure"
                   )}
                 </button>
               </div>
