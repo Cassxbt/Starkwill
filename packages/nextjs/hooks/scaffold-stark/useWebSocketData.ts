@@ -36,9 +36,13 @@ export const useWebSocketData = ({
   const [data, setData] = useState<any[]>([]);
   const subscriptionRef = useRef<any>(null);
   const connectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const startVersionRef = useRef(0);
   const { targetNetwork } = useTargetNetwork();
 
   const start = useCallback(async () => {
+    const startVersion = ++startVersionRef.current;
+    const isStale = () => startVersionRef.current !== startVersion;
+
     if (!enabled) return;
 
     // Clean up existing subscription
@@ -61,6 +65,7 @@ export const useWebSocketData = ({
     try {
       const channel: WebSocketChannel | null =
         await getSharedWebSocketChannel(targetNetwork);
+      if (isStale()) return;
       if (!channel) throw new Error("WebSocket channel unavailable");
 
       let sub: any;
@@ -79,13 +84,23 @@ export const useWebSocketData = ({
       }
 
       if (!sub) throw new Error("Unsupported subscription topic");
+      if (isStale()) {
+        try {
+          sub.unsubscribe();
+        } catch {}
+        return;
+      }
 
       subscriptionRef.current = sub;
 
       // Add minimum connection time to prevent UI flicker
       const elapsed = Date.now() - startTs;
       const minConnecting = 150; // ms
-      const setConnected = () => setStatus("connected");
+      const setConnected = () => {
+        if (!isStale()) {
+          setStatus("connected");
+        }
+      };
 
       if (elapsed < minConnecting) {
         connectTimeoutRef.current = setTimeout(
@@ -97,10 +112,12 @@ export const useWebSocketData = ({
       }
 
       sub.on((msg: any) => {
+        if (isStale()) return;
         setData((prev) => [msg, ...prev]);
         onMessage?.(msg);
       });
     } catch (e: any) {
+      if (isStale()) return;
       setError(e instanceof Error ? e : new Error(String(e)));
       setStatus("error");
     }
@@ -109,6 +126,7 @@ export const useWebSocketData = ({
   useEffect(() => {
     start();
     return () => {
+      startVersionRef.current += 1;
       if (subscriptionRef.current) {
         try {
           subscriptionRef.current.unsubscribe();
@@ -119,7 +137,6 @@ export const useWebSocketData = ({
         clearTimeout(connectTimeoutRef.current);
         connectTimeoutRef.current = null;
       }
-      setStatus("idle");
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topic, enabled, targetNetwork]);

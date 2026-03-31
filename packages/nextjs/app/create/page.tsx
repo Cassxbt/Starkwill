@@ -8,6 +8,7 @@ import { useTransactor } from "~~/hooks/scaffold-stark";
 import { Contract as StarknetContract } from "starknet";
 import { ArrowPathIcon } from "@heroicons/react/24/outline";
 import { computeCommitment, buildMerkleTree, toHex } from "~~/utils/starkwill/merkle";
+import { type HeirPackage, buildHeirPackage, serializeHeirPackage } from "~~/utils/starkwill/heirPackage";
 import { TOKENS, getTokenAddress } from "~~/utils/starkwill/tokens";
 import { VERIFIER_ADDRESS } from "~~/utils/starkwill/constants";
 import { useVault, VAULT_ABI } from "~~/contexts/VaultContext";
@@ -71,7 +72,13 @@ const slideIn: Variants = {
   visible: { opacity: 1, x: 0, transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] } },
 };
 
-type SetupStatus = "idle" | "deploying" | "configuring" | "success" | "error";
+type SetupStatus = "idle" | "deploying" | "credentials" | "configuring" | "success" | "error";
+
+interface CredentialBundle {
+  vaultAddress: string;
+  merkleRoot: string;
+  packages: HeirPackage[];
+}
 
 const CreateVault = () => {
   const { address, status } = useAccount();
@@ -91,6 +98,8 @@ const CreateVault = () => {
   const [errorMsg, setErrorMsg] = useState("");
   const [tokensToWhitelist, setTokensToWhitelist] = useState<string[]>(["ETH", "STRK"]);
   const [existingRoot, setExistingRoot] = useState<string | null>(null);
+  const [credentialBundle, setCredentialBundle] = useState<CredentialBundle | null>(null);
+  const [downloadedPackages, setDownloadedPackages] = useState<boolean[]>([]);
 
   useEffect(() => {
     if (!vaultContract) { setExistingRoot(null); return; }
@@ -104,6 +113,18 @@ const CreateVault = () => {
       }
     })();
   }, [vaultContract]);
+
+  useEffect(() => {
+    if (!credentialBundle || downloadedPackages.every(Boolean)) return;
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [credentialBundle, downloadedPackages]);
 
   const mv = (v: Variants | undefined) => (shouldReduceMotion ? undefined : v);
 
@@ -144,6 +165,10 @@ const CreateVault = () => {
     return heirWeights.reduce((sum, w) => sum + (parseFloat(w) || 0), 0);
   }, [heirWeights]);
 
+  const totalWeightBps = useMemo(() => {
+    return heirWeights.reduce((sum, w) => sum + Math.round((parseFloat(w) || 0) * 100), 0);
+  }, [heirWeights]);
+
   const merkleData = useMemo(() => {
     const validPairs = heirSecrets
       .map((s, i) => ({ secret: s.trim(), weight: heirWeights[i]?.trim() }))
@@ -156,22 +181,80 @@ const CreateVault = () => {
         return computeCommitment(secret, weightBps);
       });
       const tree = buildMerkleTree(commitments);
-      return { root: tree.root, rootHex: toHex(tree.root), count: validPairs.length };
+      return { root: tree.root, rootHex: toHex(tree.root), count: validPairs.length, commitmentHexes: commitments.map(toHex), validPairs };
     } catch {
       return null;
     }
   }, [heirSecrets, heirWeights]);
 
+  const allHeirPackagesDownloaded = credentialBundle !== null
+    && downloadedPackages.length === credentialBundle.packages.length
+    && downloadedPackages.every(Boolean);
+  const allGuardiansProvided = guardians.every((guardian) => guardian.trim().startsWith("0x") && guardian.trim().length > 10);
+  const guardiansAreDistinct = new Set(guardians.map((guardian) => guardian.trim().toLowerCase())).size === guardians.length;
+  const hasPartialHeirEntries = heirSecrets.some((secret, index) => {
+    const normalizedSecret = secret.trim();
+    const normalizedWeight = heirWeights[index]?.trim() ?? "";
+    const hasSecret = normalizedSecret.length > 0;
+    const hasWeight = normalizedWeight.length > 0 && parseFloat(normalizedWeight) > 0;
+    return hasSecret !== hasWeight;
+  });
+  const hasValidHeirConfiguration = !!merkleData && !hasPartialHeirEntries && totalWeightBps === 10_000;
+  const hasValidGuardianConfiguration = hasVault || (allGuardiansProvided && guardiansAreDistinct);
+  const canSubmitVaultConfiguration = hasValidHeirConfiguration && hasValidGuardianConfiguration;
+
+  const createCredentialBundle = (targetVaultAddress: string): CredentialBundle | null => {
+    if (!merkleData) return null;
+
+    return {
+      vaultAddress: targetVaultAddress,
+      merkleRoot: merkleData.rootHex,
+      packages: merkleData.validPairs.map((pair) => {
+        const weightBps = Math.round(parseFloat(pair.weight) * 100);
+        return buildHeirPackage({
+          vault: targetVaultAddress,
+          secret: pair.secret.startsWith("0x") ? pair.secret : `0x${pair.secret}`,
+          weightBps,
+          commitments: merkleData.commitmentHexes,
+          merkleRoot: merkleData.rootHex,
+        });
+      }),
+    };
+  };
+
+  const handleDownloadHeirPackage = (index: number) => {
+    if (!credentialBundle) return;
+
+    const pkg = credentialBundle.packages[index];
+    const blob = new Blob([serializeHeirPackage(pkg)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `starkwill-heir-${index + 1}.json`;
+    a.rel = "noopener";
+    a.click();
+    setDownloadedPackages((current) => current.map((downloaded, currentIndex) =>
+      currentIndex === index ? true : downloaded,
+    ));
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
   const handleSetupVault = async () => {
     if (!merkleData) return;
-    setSetupStatus(hasVault ? "configuring" : "deploying");
     setErrorMsg("");
 
     try {
-      let targetVaultAddress = vaultAddress;
+      if (!hasValidHeirConfiguration) {
+        throw new Error("Heir weights must sum to exactly 100% with no incomplete entries.");
+      }
+      if (!hasValidGuardianConfiguration) {
+        throw new Error("Provide 3 distinct guardian addresses before configuring the vault.");
+      }
+      let targetVaultAddress = credentialBundle?.vaultAddress ?? vaultAddress;
 
       // Tx 1: Deploy via factory (skip if vault already exists)
-      if (!hasVault) {
+      if (!hasVault && !targetVaultAddress) {
+        setSetupStatus("deploying");
         if (!factoryAddress || !provider) {
           throw new Error("Factory not available. Deploy the factory contract first.");
         }
@@ -201,16 +284,36 @@ const CreateVault = () => {
 
         targetVaultAddress = "0x" + BigInt(vaultEvent.data[0]).toString(16);
         setVaultAddress(targetVaultAddress);
-        setSetupStatus("configuring");
+      }
+
+      if (!targetVaultAddress) throw new Error("No vault address available");
+
+      const bundleNeedsRefresh = !credentialBundle
+        || credentialBundle.vaultAddress !== targetVaultAddress
+        || credentialBundle.merkleRoot !== merkleData.rootHex
+        || credentialBundle.packages.length !== merkleData.validPairs.length;
+
+      if (bundleNeedsRefresh) {
+        const nextBundle = createCredentialBundle(targetVaultAddress);
+        if (!nextBundle) throw new Error("Failed to prepare heir packages.");
+        setCredentialBundle(nextBundle);
+        setDownloadedPackages(new Array(nextBundle.packages.length).fill(false));
+        setSetupStatus("credentials");
+        return;
+      }
+
+      if (!allHeirPackagesDownloaded) {
+        setSetupStatus("credentials");
+        setErrorMsg("Download every heir package before configuring the vault.");
+        return;
       }
 
       // Tx 2: Configure vault (set verifier + merkle root + whitelist tokens)
-      if (!targetVaultAddress) throw new Error("No vault address available");
-
+      setSetupStatus("configuring");
       const vault = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddress });
       const configCalls = [
         vault.populate("set_verifier_address", [VERIFIER_ADDRESS]),
-        vault.populate("set_heir_merkle_root", [merkleData.rootHex]),
+        vault.populate("set_heir_merkle_root", [credentialBundle.merkleRoot]),
         ...tokensToWhitelist.map((sym) =>
           vault.populate("whitelist_token", [getTokenAddress(sym), true]),
         ),
@@ -258,11 +361,11 @@ const CreateVault = () => {
         className="text-center mb-4"
       >
         <h1 className="text-3xl font-bold mb-2 tracking-tight text-[var(--sw-text)]">
-          {hasVault ? "Configure Vault" : "Create Inheritance Vault"}
+          {hasVault ? "Update Heir Configuration" : "Create Inheritance Vault"}
         </h1>
         <p className="text-[var(--sw-text-secondary)] text-sm">
           {hasVault
-            ? "Update your existing vault configuration"
+            ? "Replace the heir root and whitelist on your existing vault"
             : "Deploy and configure your dead-man\u2019s switch vault"}
         </p>
       </motion.div>
@@ -274,6 +377,17 @@ const CreateVault = () => {
           className="mb-4 px-4 py-2 bg-emerald-500/[0.08] border border-emerald-500/15 text-xs text-emerald-400 font-medium font-mono-code"
         >
           Vault: {vaultAddress?.slice(0, 12)}...{vaultAddress?.slice(-8)}
+        </motion.div>
+      )}
+
+      {hasVault && (
+        <motion.div
+          initial={shouldReduceMotion ? undefined : { opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="mb-6 max-w-lg px-4 py-3 bg-amber-500/[0.06] border border-amber-500/15 text-xs text-[var(--sw-text-secondary)]"
+        >
+          Existing guardian addresses and timer settings are not loaded into this form. Saving here updates the
+          verifier, replaces the heir Merkle root, and re-applies the selected token whitelist entries only.
         </motion.div>
       )}
 
@@ -487,13 +601,18 @@ const CreateVault = () => {
                   ))}
 
                   <div className={`text-xs font-medium ${
-                    Math.abs(totalWeight - 100) < 0.01
+                    totalWeightBps === 10_000
                       ? "text-emerald-400"
                       : "text-amber-400"
                   }`}>
                     Total weight: {totalWeight.toFixed(2)}%
-                    {Math.abs(totalWeight - 100) >= 0.01 && " (should equal 100%)"}
+                    {totalWeightBps !== 10_000 && " (should equal 100%)"}
                   </div>
+                  {hasPartialHeirEntries && (
+                    <p className="text-[11px] text-amber-400">
+                      Every heir row must include both a secret and a positive weight.
+                    </p>
+                  )}
 
                   {merkleData && (
                     <div className="p-4 bg-emerald-500/[0.06] border border-emerald-500/15 space-y-1.5">
@@ -512,7 +631,7 @@ const CreateVault = () => {
                 </button>
                 <button
                   onClick={() => setStep(3)}
-                  disabled={!merkleData}
+                  disabled={!hasValidHeirConfiguration}
                   className="flex-1 px-6 py-3 font-medium text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 disabled:opacity-40 transition-colors"
                 >
                   Review
@@ -563,6 +682,16 @@ const CreateVault = () => {
                       This will require 2 wallet signatures: one to deploy the vault, one to configure it.
                     </p>
                   )}
+                  {!hasValidGuardianConfiguration && (
+                    <p className="text-[11px] text-amber-400 pt-2">
+                      Vault setup requires 3 distinct guardian addresses.
+                    </p>
+                  )}
+                  {!hasValidHeirConfiguration && (
+                    <p className="text-[11px] text-amber-400">
+                      Heir weights must sum to exactly 100%, and every active row must be complete.
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -593,6 +722,26 @@ const CreateVault = () => {
                     <div>
                       <p className="text-sm font-medium text-zinc-200">Configuring vault...</p>
                       <p className="text-[11px] text-[var(--sw-text-tertiary)]">Setting verifier, merkle root, and token whitelist{!hasVault && " (sign tx 2/2)"}</p>
+                    </div>
+                  </motion.div>
+                )}
+
+                {setupStatus === "credentials" && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    className="p-4 bg-amber-500/[0.06] border border-amber-500/15 flex items-center gap-3"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-400">
+                      <path d="M12 9v4M12 17h.01" />
+                      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+                    </svg>
+                    <div>
+                      <p className="text-sm font-medium text-zinc-200">Download heir packages before continuing</p>
+                      <p className="text-[11px] text-[var(--sw-text-tertiary)]">
+                        These files are the claim credentials. Leaving now before downloading them can strand the vault.
+                      </p>
                     </div>
                   </motion.div>
                 )}
@@ -633,17 +782,60 @@ const CreateVault = () => {
                 )}
               </AnimatePresence>
 
+              {credentialBundle && (setupStatus === "credentials" || setupStatus === "success") && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-5 bg-[var(--sw-surface)] border border-emerald-500/15 space-y-3"
+                >
+                  <p className="text-xs font-medium text-[var(--sw-text-secondary)]">Heir Credentials</p>
+                  <p className="text-[11px] text-[var(--sw-text-tertiary)]">
+                    Download each heir&apos;s package and deliver it to them securely. Each file contains their secret, weight, vault address, and the full commitment list needed to claim.
+                  </p>
+                  <p className="text-[11px] text-[var(--sw-text-tertiary)]">
+                    Vault: <span className="font-mono-code text-[var(--sw-text-secondary)]">{credentialBundle.vaultAddress}</span>
+                  </p>
+                  <p className="text-[11px] text-[var(--sw-text-tertiary)]">
+                    Root: <span className="font-mono-code text-[var(--sw-text-secondary)]">{credentialBundle.merkleRoot}</span>
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {credentialBundle.packages.map((_, i) => (
+                      <button
+                        key={i}
+                        onClick={() => handleDownloadHeirPackage(i)}
+                        className="px-4 py-2 text-xs font-medium border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10 transition-all flex items-center gap-1.5"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="7,10 12,15 17,10" />
+                          <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                        Heir {i + 1}{downloadedPackages[i] ? " ✓" : ""}
+                      </button>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+
               <div className="flex gap-3">
                 <button onClick={() => setStep(2)} className="flex-1 px-6 py-3 text-sm font-medium border border-[var(--sw-border)] text-[var(--sw-text-secondary)] hover:text-[var(--sw-text-dim)] hover:border-[var(--sw-border-hover)] transition-all">
                   Back
                 </button>
                 <button
                   onClick={handleSetupVault}
-                  disabled={!merkleData || setupStatus === "deploying" || setupStatus === "configuring"}
+                  disabled={
+                    !canSubmitVaultConfiguration
+                    || setupStatus === "deploying"
+                    || setupStatus === "configuring"
+                    || setupStatus === "success"
+                    || (setupStatus === "credentials" && !allHeirPackagesDownloaded)
+                  }
                   className="flex-1 px-6 py-3 font-medium text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 disabled:opacity-40 transition-colors"
                 >
                   {setupStatus === "deploying" || setupStatus === "configuring" ? (
                     <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
+                  ) : setupStatus === "credentials" ? (
+                    allHeirPackagesDownloaded ? "Configure Vault" : "Download All Packages First"
                   ) : setupStatus === "success" ? (
                     "Done"
                   ) : hasVault ? (

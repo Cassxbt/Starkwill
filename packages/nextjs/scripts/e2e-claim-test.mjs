@@ -30,12 +30,16 @@ if (!PRIVATE_KEY || !ACCOUNT_ADDRESS) {
 }
 
 const HEIR_SECRET = 42n;
-const ALL_SECRETS = [42n, 123n, 456n];
+const HEIR_WEIGHT_BPS = 5000n;
+const ALL_HEIRS = [
+  { secret: 42n, weightBps: 5000n },
+  { secret: 123n, weightBps: 3000n },
+  { secret: 456n, weightBps: 2000n },
+];
 
 // ── Merkle utils (mirrors merkle.ts) ──
 const DEPTH = 8;
 const ZERO = 0n;
-
 function toBE32(value) {
   const bytes = new Uint8Array(32);
   let v = value;
@@ -53,7 +57,7 @@ function hash2(a, b) {
   return result;
 }
 
-function computeCommitment(secret) { return hash2(secret, ZERO); }
+function computeCommitment(secret, weightBps) { return hash2(secret, weightBps); }
 function computeNullifier(secret, vaultAddr) { return hash2(secret, vaultAddr); }
 
 function buildMerkleTree(commitments) {
@@ -130,9 +134,9 @@ async function main() {
   // Step 3: Build Merkle tree + proof
   console.log("3. Building Merkle tree and proof...");
   const vaultAddr = BigInt(VAULT_ADDRESS);
-  const commitments = ALL_SECRETS.map(computeCommitment);
+  const commitments = ALL_HEIRS.map(({ secret, weightBps }) => computeCommitment(secret, weightBps));
   const tree = buildMerkleTree(commitments);
-  const commitment = computeCommitment(HEIR_SECRET);
+  const commitment = computeCommitment(HEIR_SECRET, HEIR_WEIGHT_BPS);
   const leafIndex = commitments.findIndex((c) => c === commitment);
   const merkleProof = generateMerkleProof(tree, leafIndex);
   const nullifier = computeNullifier(HEIR_SECRET, vaultAddr);
@@ -145,11 +149,13 @@ async function main() {
   console.log("4. Executing Noir circuit (witness)...");
   const circuitInputs = {
     secret: toHex(HEIR_SECRET),
+    weight_bps: toHex(HEIR_WEIGHT_BPS),
     path_indices: merkleProof.pathIndices.map(toHex),
     path_siblings: merkleProof.pathSiblings.map(toHex),
     merkle_root: toHex(tree.root),
     nullifier_hash: toHex(nullifier),
     vault_address: toHex(vaultAddr),
+    weight_bps_pub: toHex(HEIR_WEIGHT_BPS),
   };
   const noir = new Noir(circuit);
   const execResult = await noir.execute(circuitInputs);

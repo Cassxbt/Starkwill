@@ -21,9 +21,10 @@ fn hash2(a: Field, b: Field) -> Field {
 
 fn main(
     secret: pub Field,
+    weight_bps: pub Field,
     vault_address: pub Field,
 ) -> pub [Field; 3] {
-    let commitment = hash2(secret, 0);
+    let commitment = hash2(secret, weight_bps);
     let mut current = commitment;
     for _i in 0..DEPTH {
         current = hash2(current, 0);

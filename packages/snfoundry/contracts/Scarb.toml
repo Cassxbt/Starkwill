@@ -28,9 +28,8 @@ sort-module-level-items = true
 
 [[tool.snforge.fork]]
 name = "SEPOLIA_LATEST"
-url = "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/_hKu4IgnPgrF8O82GLuYU"
+url = "https://starknet-sepolia.public.blastapi.io/rpc/v0_7"
 block_id.tag = "latest"
 
 [tool]
 panic-backtrace = true
-

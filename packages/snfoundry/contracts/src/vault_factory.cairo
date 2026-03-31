@@ -2,7 +2,7 @@ use starknet::ContractAddress;
 use starknet::get_caller_address;
 
 #[starknet::interface]
-trait IVaultFactory<TContractState> {
+pub trait IVaultFactory<TContractState> {
     fn create_vault(
         ref self: TContractState,
         checkin_period_secs: u64,
@@ -19,6 +19,7 @@ trait IVaultFactory<TContractState> {
 #[starknet::contract]
 mod vault_factory {
     use super::{ContractAddress, get_caller_address};
+    use core::num::traits::Zero;
     use starknet::ClassHash;
     use starknet::storage::{
         Map,
@@ -69,6 +70,7 @@ mod vault_factory {
             guardian_3: ContractAddress,
         ) -> ContractAddress {
             let owner = get_caller_address();
+            assert(self.owner_vault.entry(owner).read().is_zero(), 'VAULT_EXISTS');
             let salt = self.vault_count.read();
 
             let mut calldata: Array<felt252> = ArrayTrait::new();

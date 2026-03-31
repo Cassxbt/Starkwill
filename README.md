@@ -1,279 +1,261 @@
-# StarkWill — Private Crypto Inheritance on Starknet
+# StarkWill
 
-**What happens to your crypto when you die?**
+StarkWill is a privacy-preserving inheritance vault on Starknet.
 
-StarkWill is a privacy-preserving inheritance protocol built on Starknet. It combines a **dead-man's switch** vault with **zero-knowledge proofs** so heirs can claim assets without ever revealing their identity on-chain.
+The owner configures a vault with a check-in period, a grace period, a 2-of-3 guardian set, and a private heir set represented by a Merkle root. If the owner keeps checking in, the vault stays locked. If the owner stops checking in for long enough, or guardians unlock it early, heirs can claim with a zero-knowledge proof.
 
-No lawyers. No centralized custodians. No identity exposure. Just math.
+This repository contains the Cairo contracts, the Noir circuit, the browser-side prover flow, and the Next.js frontend used to configure and claim from the vault.
 
-> Built for the [Starknet Re{define} Hackathon 2026](https://dorahacks.io/hackathon/redefine/detail) — Privacy Track
+Live app: [starkwill.vercel.app](https://starkwill.vercel.app)
 
-**[Live Demo](https://starkwill.vercel.app)** | **[Video Demo](#)**
+## What the system does
 
----
+- Creates one inheritance vault per owner.
+- Keeps the vault locked while the owner remains active.
+- Allows a 2-of-3 guardian set to unlock the vault early.
+- Stores only a Merkle root of the heir set on-chain.
+- Lets each heir prove membership and weight without revealing their secret.
+- Snapshots each token's distributable balance on first claim so weighted payouts do not depend on claim order.
 
-## The Problem
+## What the system does not do
 
-An estimated **$140 billion** in crypto is permanently lost due to holders dying without a recovery plan. Current inheritance solutions require trusting lawyers, centralized custodians, or exposing heir identities on-chain — defeating the purpose of self-custody.
+- It does not hide the wallet that submits a claim transaction. The proof hides which committed heir is claiming, not the recipient address.
+- It does not currently enforce the sum of all heir weights on-chain. The official app enforces `10000` basis points during setup.
+- It does not model recurring inheritance rounds. The current contract is intentionally a one-shot inheritance event.
+- It does not treat late direct ERC-20 transfers after the first claim snapshot as part of the active distribution round.
 
-## The Solution
+## Protocol outline
 
-StarkWill introduces a non-custodial vault where:
+### 1. Vault setup
 
-1. **Owner** deposits assets and checks in periodically (dead-man's switch)
-2. **Heirs** are registered as cryptographic commitments — no addresses stored on-chain
-3. If the owner stops checking in, the vault unlocks
-4. **Heirs claim anonymously** via ZK proof: "I am in the heir group" without revealing *which* heir
+The owner creates a vault through the factory and configures:
 
----
+- `checkin_period_secs`
+- `grace_period_secs`
+- three guardian addresses
+- a verifier address
+- a Merkle root representing the heir set
+- an ERC-20 token whitelist
 
-## Privacy Model
+The heir set is prepared off-chain. Each heir is represented as:
 
-```
-WHAT'S PRIVATE                        HOW
-───────────────                        ───
-Heir identity on claim           ZK proof of Merkle membership (Noir + Garaga)
-Heir list                        Stored as Blake3 commitment hashes, not addresses
-Which heir claimed               Nullifier hash — prevents double-claim without linking identity
-Heir-to-secret mapping           Secrets never leave the heir's browser
-Heir share percentages           Weight bound inside ZK proof, not stored on-chain
-Deposit source linkage           Tongo confidential transfers break the on-chain trail
-
-WHAT'S PUBLIC (by design)
-─────────────────────────
-Vault existence, owner address, check-in timestamps,
-guardian addresses, token types, total balance
+```text
+commitment = hash(secret, weight_bps)
 ```
 
-### Privacy Flow
+The frontend builds a Merkle tree from those commitments and stores only the root on-chain.
 
-```
-                Owner's Wallet
-                      │
-          ┌───────────┴───────────┐
-          │                       │
-     Standard Deposit      Private Deposit
-     (direct ERC-20)       (via Tongo)
-          │                       │
-          │              ┌────────┴────────┐
-          │              │  1. Fund Tongo  │  ERC-20 → encrypted balance
-          │              │  2. Withdraw    │  encrypted → vault (breaks link)
-          │              └────────┬────────┘
-          │                       │
-          └───────────┬───────────┘
-                      ▼
-              ┌──────────────┐
-              │ StarkWill    │  Assets held in vault
-              │ Vault        │  Owner checks in periodically
-              └──────┬───────┘
-                     │ Owner stops checking in
-                     ▼
-              ┌──────────────┐
-              │ Heir claims  │  ZK proof: "I'm in the heir group"
-              │ anonymously  │  No identity revealed on-chain
-              └──────────────┘
-```
+### 2. Credential distribution
 
----
+After setup, the frontend exports one package per heir. Each package contains:
+
+- vault address
+- heir secret
+- heir weight in basis points
+- commitment list
+- Merkle root
+- package version
+
+The app does not persist heir secrets for long-term custody. The package is the claim credential and needs to be distributed and backed up intentionally.
+
+### 3. Active period
+
+While the vault is not claimable:
+
+- the owner can check in
+- the owner can recover assets during the cancel window
+- approved ERC-20 tokens can be deposited
+
+### 4. Claim phase
+
+The vault becomes claimable when either:
+
+- the owner misses the check-in deadline plus grace period, or
+- at least two guardians approve unlock
+
+Once claimability begins, owner-side mutation is frozen. The owner can no longer re-lock the vault or replace core configuration.
+
+### 5. Heir claim
+
+The heir imports their package, generates the proof locally in the browser, and submits `claim_with_proof`.
+
+The proof binds:
+
+- `merkle_root`
+- `nullifier_hash`
+- `vault_address`
+- `weight_bps_pub`
+
+The contract verifies the proof, checks that the nullifier has not been used for that token, snapshots the token balance on first claim, and transfers the claimant's weighted share.
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                   Frontend (Next.js 15)                  │
-│              Scaffold-Stark 2 · Dark Theme               │
-│                                                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │ Merkle Tree  │  │  ZK Prover   │  │  Contract     │  │
-│  │  (Blake3)    │  │  (bb.js WASM)│  │  Hooks        │  │
-│  │  Commitment  │  │  ~5s proofs  │  │  (read/write) │  │
-│  │  generation  │  │  in-browser  │  │               │  │
-│  └──────┬───────┘  └──────┬───────┘  └───────┬───────┘  │
-│         │                 │                   │          │
-│         │     ┌───────────┘                   │          │
-│         │     │  Garaga calldata conversion   │          │
-│         ▼     ▼                               ▼          │
-├──────────────────────────────────────────────────────────┤
-│                    Starknet (Sepolia)                     │
-│                                                          │
-│  ┌─────────────────────┐     ┌────────────────────────┐  │
-│  │   StarkWill Vault   │────▶│  ZK Verifier (Garaga)  │  │
-│  │                     │     │  UltraKeccakZKHonk     │  │
-│  │  - check_in()       │     └────────────────────────┘  │
-│  │  - deposit()        │                                 │
-│  │  - claim_with_proof()    ┌────────────────────────┐   │
-│  │  - guardian_unlock()│    │  Noir Circuit           │   │
-│  │  - recover()        │    │  (compiled off-chain)   │   │
-│  └─────────────────────┘    │  - Merkle membership    │   │
-│                             │  - Nullifier derivation │   │
-│  ┌─────────────────────┐    └────────────────────────┘   │
-│  │   Vault Factory     │                                 │
-│  │  deploy_syscall()   │                                 │
-│  └─────────────────────┘                                 │
-└──────────────────────────────────────────────────────────┘
-```
+### Contracts
 
-### Smart Contracts (Cairo)
+- [vault.cairo](/Users/apple/Starknet/starkwill-app/packages/snfoundry/contracts/src/vault.cairo)
+  Core inheritance logic: check-in, guardian unlock, token whitelist, claim gating, balance snapshots, proof verification, and payout.
+- [vault_factory.cairo](/Users/apple/Starknet/starkwill-app/packages/snfoundry/contracts/src/vault_factory.cairo)
+  Factory deployment path. Enforces one vault per owner.
 
-- **StarkWill Vault** (284 lines) — Dead-man's-switch with configurable check-in/grace periods, 2-of-3 guardian emergency unlock, ERC-20 token whitelist, on-chain ZK proof verification, nullifier-based double-claim prevention
-- **Vault Factory** (76 lines) — Deterministic vault deployment via `deploy_syscall` with unique salts
-- **ZK Verifier** — Garaga-generated on-chain verifier for UltraKeccakZKHonk proofs
+### Circuit
 
-### ZK Circuit (Noir)
+- [main.nr](/Users/apple/Starknet/starkwill-app/packages/snfoundry/circuits/heir_membership/src/main.nr)
+  Noir circuit proving Merkle membership and vault-bound nullifier validity.
 
-- **heir_membership** — Proves Merkle tree membership (depth 8, up to 256 heirs) using Blake3 hashing. Public inputs: `merkle_root`, `nullifier_hash`, `vault_address`
-- Compiled to UltraKeccakZKHonk for gas-efficient Starknet verification via Garaga
+### Frontend
 
-### Frontend (Next.js)
+- [create/page.tsx](/Users/apple/Starknet/starkwill-app/packages/nextjs/app/create/page.tsx)
+  Vault creation and configuration flow, including package export.
+- [dashboard/page.tsx](/Users/apple/Starknet/starkwill-app/packages/nextjs/app/dashboard/page.tsx)
+  Owner dashboard for deposits, check-in, and vault state.
+- [guardian/page.tsx](/Users/apple/Starknet/starkwill-app/packages/nextjs/app/guardian/page.tsx)
+  Guardian approval flow.
+- [claim/page.tsx](/Users/apple/Starknet/starkwill-app/packages/nextjs/app/claim/page.tsx)
+  Heir import flow, browser proof generation, and claim submission.
 
-| Page | Description |
-|------|-------------|
-| **Create Vault** | 4-step wizard: timing config, guardian addresses, heir secrets (live Merkle tree computation), token whitelist |
-| **Dashboard** | Check-in, standard & private (Tongo) deposits, vault status, ZK claim event history |
-| **Guardian** | Emergency 2-of-3 unlock approval for designated guardians |
-| **Claim** | Enter heir secret, generate ZK proof in-browser (~5s via bb.js WASM), submit anonymous claim |
-| **How It Works** | Interactive explainer of the protocol |
+### Shared frontend logic
 
----
+- [merkle.ts](/Users/apple/Starknet/starkwill-app/packages/nextjs/utils/starkwill/merkle.ts)
+  Hashing, Merkle tree construction, proof generation, and nullifier derivation.
+- [prover.ts](/Users/apple/Starknet/starkwill-app/packages/nextjs/utils/starkwill/prover.ts)
+  Browser-side Noir execution, Barretenberg proof generation, and Garaga calldata conversion.
+- [heirPackage.ts](/Users/apple/Starknet/starkwill-app/packages/nextjs/utils/starkwill/heirPackage.ts)
+  Package schema, parsing, normalization, and stale-root checks.
 
-## Tech Stack
+## Current contract properties
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Smart Contracts | Cairo (Scarb 2.16.0, snforge 0.56.0) | Vault logic, access control, ZK verification |
-| ZK Circuit | Noir v1.0.0-beta.16 | Merkle membership proof |
-| Proof System | UltraKeccakZKHonk (Barretenberg) | ZK proof generation (in-browser WASM) |
-| On-chain Verifier | Garaga v1.0.1 | Gas-efficient proof verification on Starknet |
-| Frontend | Next.js 15, Scaffold-Stark 2 | Wallet connection, contract interaction |
-| Hashing | Blake3 (@noble/hashes) | Merkle tree + commitment + nullifier derivation |
-| Confidential Transfers | Tongo SDK (ElGamal encryption) | Private deposits — breaks on-chain source linkage |
-| Network | Starknet Sepolia | Testnet deployment |
+- One vault per owner is enforced in the factory.
+- Deposits revert once the vault is claimable.
+- Recovery reverts once the vault is claimable.
+- Owner config mutation reverts once claimability begins.
+- Guardian approvals reset on owner check-in.
+- Claim payouts are based on a fixed token snapshot taken on first claim.
+- Nullifiers are tracked per token, so one heir credential can claim once per token.
 
----
+## Privacy model
 
-## Deployed Contracts (Sepolia)
+What is private:
 
-| Contract | Address |
-|----------|---------|
-| StarkWill Vault (v2, weighted shares) | [`0x656c5beb...c8673`](https://sepolia.starkscan.co/contract/0x656c5beb9d880efeb4a1f25a2fb030737c85b410c5fd83e55b9ff370c0c8673) |
-| ZK Verifier (Garaga) | [`0x02ba3af4...cb9f53`](https://sepolia.starkscan.co/contract/0x02ba3af461b512d9053f6435d0a0b9278394cd7adb461450c258d586a8cb9f53) |
+- the heir secret
+- which committed heir corresponds to a given claim
+- the weight as an on-chain configuration table
 
-Both contracts are verified and functional on Sepolia. The vault supports **weighted heir shares** — each heir's share percentage is cryptographically bound in their ZK proof via the Noir circuit, with no on-chain weight mapping (preserving full privacy). E2E tested: deploy → set verifier → set heir Merkle root → deposit STRK → generate ZK proof → claim with weighted proof.
+What is public:
 
----
+- vault existence
+- owner address
+- guardian addresses
+- token types and balances
+- the Merkle root
+- the claiming wallet address
+- the transferred amount
 
-## How It Works
+The system provides private heir membership, not full transaction anonymity.
 
-### For the Vault Owner
+## Repository layout
 
-1. **Create vault** — configure check-in period (e.g., 30 days), grace period, and 3 guardian addresses
-2. **Add heirs** — each heir generates a secret offline; owner registers Blake3 commitment hashes in a Merkle tree
-3. **Deposit assets** — whitelist and deposit any ERC-20 token (ETH, STRK, WBTC). Optional **private deposits** via Tongo break the on-chain link between your wallet and the vault
-4. **Check in periodically** — resets the dead-man's switch timer. Miss a check-in → vault becomes claimable
-
-### For Heirs
-
-1. **Wait** until the vault is claimable (owner missed check-in + grace period elapsed)
-2. **Enter your secret** — commitment and nullifier are computed locally in your browser
-3. **Generate ZK proof** — proves Merkle membership without revealing which leaf. Proof generated in-browser via bb.js WASM (~5 seconds)
-4. **Submit claim** — Garaga verifier checks the proof on-chain. Assets transferred. Nullifier recorded to prevent double-claims
-
-### For Guardians
-
-- **Emergency unlock** — 2-of-3 guardians can unlock the vault before the timer expires
-- Use case: owner is incapacitated but heirs need immediate access
-- Guardian addresses are set at vault creation and cannot be changed
-
----
-
-## Testing
-
-**14 Cairo contract tests** covering:
-
-| Category | Tests |
-|----------|-------|
-| Core lifecycle | `deploy_and_check_in`, `check_in_resets_timer`, `claimable_after_timeout`, `not_claimable_before_timeout` |
-| Access control | `check_in_not_owner`, `set_merkle_root_not_owner`, `non_guardian_cannot_approve` |
-| Guardian system | `guardian_unlock` (2-of-3), `guardian_double_approve_idempotent` |
-| Heir config | `add_heir`, `set_heir_merkle_root`, `nullifier_initially_unused` |
-| Recovery | `recover_after_cancel_window`, `set_verifier_address` |
-
-```bash
-cd packages/snfoundry/contracts
-snforge test
-# Tests: 14 passed, 0 failed
-```
-
----
-
-## Project Structure
-
-```
+```text
 starkwill-app/
 ├── packages/
-│   ├── nextjs/                      # Frontend
+│   ├── nextjs/
 │   │   ├── app/
-│   │   │   ├── create/              # Vault creation wizard
-│   │   │   ├── dashboard/           # Owner dashboard + Tongo deposits
-│   │   │   ├── guardian/            # Guardian emergency unlock
-│   │   │   ├── claim/               # Anonymous heir claim
-│   │   │   └── how-it-works/        # Protocol explainer
+│   │   ├── contexts/
+│   │   ├── contracts/
+│   │   ├── hooks/
 │   │   └── utils/starkwill/
-│   │       ├── merkle.ts            # Blake3 Merkle tree (mirrors Noir circuit)
-│   │       ├── prover.ts            # In-browser ZK proof generation
-│   │       ├── tokens.ts            # Token registry
-│   │       └── tongo.ts             # Tongo confidential transfer wrapper
 │   └── snfoundry/
-│       ├── contracts/
-│       │   ├── src/
-│       │   │   ├── vault.cairo      # Core vault contract (284 lines)
-│       │   │   └── vault_factory.cairo  # Factory deployer (76 lines)
-│       │   └── tests/
-│       │       └── test_contract.cairo  # 14 integration tests
-│       └── circuits/
-│           └── heir_membership/     # Noir circuit + Garaga verifier
-│               ├── src/main.nr      # ZK circuit source
-│               └── heir_verifier/   # On-chain verifier (Cairo)
+│       ├── circuits/
+│       └── contracts/
+└── .github/workflows/
 ```
 
----
-
-## Getting Started
+## Local development
 
 ### Prerequisites
 
-- Node.js 18+
-- Yarn
-- Scarb 2.16.0 & snforge 0.56.0
-- Starknet wallet (Argent X or Braavos)
+- Node.js 22
+- npm
+- Scarb 2.16.0
+- snforge 0.56.0
+- a Starknet wallet for frontend testing
 
-### Install & Run
+### Install
 
 ```bash
-git clone https://github.com/Cassxbt/Starkwill.git
-cd Starkwill
-
-yarn install
-yarn start
+npm install --legacy-peer-deps
 ```
 
-### Run Tests
+### Run the frontend
+
+```bash
+npm run start
+```
+
+### Typecheck
+
+```bash
+npm run next:check-types
+```
+
+### Frontend tests
+
+```bash
+npm run test:nextjs
+```
+
+### Frontend production build
+
+```bash
+npm run build:nextjs
+```
+
+### Cairo tests
 
 ```bash
 cd packages/snfoundry/contracts
 snforge test
 ```
 
-### Deploy Contracts
+Current verified status:
+
+- Cairo tests: `24 passed`
+- Frontend tests: `302 passed`, `9 skipped`
+- Typecheck: passing
+- Production build: passing
+
+## Deployment notes
+
+The frontend is deployed on Vercel. The repo uses npm workspaces and currently installs with `--legacy-peer-deps` because of dependency constraints in the frontend workspace.
+
+For contract deployment:
 
 ```bash
 cp packages/snfoundry/.env.example packages/snfoundry/.env
-# Edit with PRIVATE_KEY_SEPOLIA, ACCOUNT_ADDRESS_SEPOLIA, RPC_URL_SEPOLIA
+# fill in PRIVATE_KEY_SEPOLIA, ACCOUNT_ADDRESS_SEPOLIA, RPC_URL_SEPOLIA
 
-yarn deploy --network sepolia
+npm run deploy -- --network sepolia
 ```
 
----
+## Demo path
+
+The cleanest demo is:
+
+1. create a vault
+2. export heir packages
+3. deposit assets
+4. unlock via guardians
+5. import a package on the claim page
+6. generate the proof locally
+7. submit the claim
+
+That sequence matches the current contract design and is the least misleading way to present the project.
+
+## Known limitations
+
+- Aggregate heir weight integrity is enforced by the official app, not cryptographically by the contract.
+- Direct token transfers to the vault after the first claim snapshot are outside the intended payout model.
+- The Tongo path is still experimental and should not be treated as the core protocol path.
+- Existing-vault editing in the frontend is partial management, not a full admin console.
 
 ## License
 

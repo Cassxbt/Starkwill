@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import type { Variants } from "framer-motion";
 import { useAccount, useProvider } from "@starknet-react/core";
@@ -97,49 +97,53 @@ const Dashboard = () => {
   const [countdownLabel, setCountdownLabel] = useState<string | null>(null);
   const [countdownPhase, setCountdownPhase] = useState<CountdownPhase>(null);
 
+  const refreshVaultState = useCallback(async () => {
+    if (!vaultContract) return;
+    const [claimable, root, verifier] = await Promise.all([
+      vaultContract.call("is_claimable"),
+      vaultContract.call("get_heir_merkle_root"),
+      vaultContract.call("get_verifier_address"),
+    ]);
+    setIsClaimable(!!claimable);
+    const rootStr = typeof root === "bigint" ? root.toString() : String(root);
+    setHeirMerkleRoot(rootStr === "0" ? null : rootStr);
+    const verStr = typeof verifier === "bigint" ? verifier.toString() : String(verifier);
+    setVerifierAddress(verStr === "0" ? null : verStr);
+  }, [vaultContract]);
+
+  const refreshVaultTiming = useCallback(async () => {
+    if (!vaultAddress || !provider) return;
+    const [lastRaw, periodRaw, graceRaw] = await Promise.all([
+      (provider as any).getStorageAt(vaultAddress, STORAGE_KEY_LAST_CHECKIN),
+      (provider as any).getStorageAt(vaultAddress, STORAGE_KEY_CHECKIN_PERIOD),
+      (provider as any).getStorageAt(vaultAddress, STORAGE_KEY_GRACE_PERIOD),
+    ]);
+    setLastCheckinTs(Number(BigInt(lastRaw)));
+    setCheckinPeriodSecs(Number(BigInt(periodRaw)));
+    setGracePeriodSecs(Number(BigInt(graceRaw)));
+  }, [vaultAddress, provider]);
+
   useEffect(() => {
     if (!vaultContract) return;
-    let cancelled = false;
     (async () => {
       try {
-        const [claimable, root, verifier] = await Promise.all([
-          vaultContract.call("is_claimable"),
-          vaultContract.call("get_heir_merkle_root"),
-          vaultContract.call("get_verifier_address"),
-        ]);
-        if (cancelled) return;
-        setIsClaimable(!!claimable);
-        const rootStr = typeof root === "bigint" ? root.toString() : String(root);
-        setHeirMerkleRoot(rootStr === "0" ? null : rootStr);
-        const verStr = typeof verifier === "bigint" ? verifier.toString() : String(verifier);
-        setVerifierAddress(verStr === "0" ? null : verStr);
+        await refreshVaultState();
       } catch (e) {
         console.error("Failed to read vault state:", e);
       }
     })();
-    return () => { cancelled = true; };
-  }, [vaultContract]);
+  }, [refreshVaultState, vaultContract]);
 
   useEffect(() => {
     if (!vaultAddress || !provider) return;
-    let cancelled = false;
     (async () => {
       try {
-        const [lastRaw, periodRaw, graceRaw] = await Promise.all([
-          (provider as any).getStorageAt(vaultAddress, STORAGE_KEY_LAST_CHECKIN),
-          (provider as any).getStorageAt(vaultAddress, STORAGE_KEY_CHECKIN_PERIOD),
-          (provider as any).getStorageAt(vaultAddress, STORAGE_KEY_GRACE_PERIOD),
-        ]);
-        if (cancelled) return;
-        setLastCheckinTs(Number(BigInt(lastRaw)));
-        setCheckinPeriodSecs(Number(BigInt(periodRaw)));
-        setGracePeriodSecs(Number(BigInt(graceRaw)));
+        await refreshVaultTiming();
       } catch (e) {
         console.error("Failed to read vault timing:", e);
       }
     })();
-    return () => { cancelled = true; };
-  }, [vaultAddress, provider]);
+  }, [refreshVaultTiming, vaultAddress, provider]);
 
   useEffect(() => {
     if (lastCheckinTs == null || checkinPeriodSecs == null || gracePeriodSecs == null) return;
@@ -229,6 +233,7 @@ const Dashboard = () => {
     try {
       const call = new StarknetContract({ abi: VAULT_ABI as any, address: vaultAddress! }).populate("check_in", []);
       await writeTransaction([call]);
+      await Promise.all([refreshVaultState(), refreshVaultTiming()]);
     } catch (e) {
       console.error("Check-in failed:", e);
     } finally {

@@ -1,14 +1,15 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import type { Variants } from "framer-motion";
 import { useAccount } from "@starknet-react/core";
 import { useTransactor } from "~~/hooks/scaffold-stark";
 import { Contract as StarknetContract } from "starknet";
 import { computeCommitment, computeNullifier, toHex } from "~~/utils/starkwill/merkle";
+import { ParsedHeirPackage, packageMatchesMerkleRoot, parseHeirPackage } from "~~/utils/starkwill/heirPackage";
+import { getRpcUrl } from "~~/services/web3/provider";
 import { TOKENS, getTokenAddress } from "~~/utils/starkwill/tokens";
-import { generateClaimProof } from "~~/utils/starkwill/prover";
 import { useVault, VAULT_ABI } from "~~/contexts/VaultContext";
 
 type ClaimStatus = "idle" | "computing" | "generating" | "submitting" | "success" | "error";
@@ -61,9 +62,22 @@ const Claim = () => {
   const [errorMsg, setErrorMsg] = useState("");
   const [isClaimable, setIsClaimable] = useState<boolean | null>(null);
   const [merkleRoot, setMerkleRoot] = useState<string | null>(null);
+  const [importError, setImportError] = useState("");
+  const [importedPackage, setImportedPackage] = useState<ParsedHeirPackage | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const targetVaultAddr = hasVault ? vaultAddress : (manualVaultAddr.startsWith("0x") && manualVaultAddr.length > 10 ? manualVaultAddr : null);
+  const targetVaultAddr = importedPackage?.vault
+    ?? (hasVault ? vaultAddress : (manualVaultAddr.startsWith("0x") && manualVaultAddr.length > 10 ? manualVaultAddr : null));
   const vaultAddrBigInt = targetVaultAddr ? BigInt(targetVaultAddr) : 0n;
+  const importedVaultDiffersFromConnectedVault = !!(
+    importedPackage
+    && hasVault
+    && vaultAddress
+    && BigInt(importedPackage.vault) !== BigInt(vaultAddress)
+  );
+  const packageCompatibilityError = importedPackage && merkleRoot && !packageMatchesMerkleRoot(importedPackage, merkleRoot)
+    ? "Imported package does not match the live heir root on this vault."
+    : "";
 
   useEffect(() => {
     if (!targetVaultAddr) { setIsClaimable(null); setMerkleRoot(null); return; }
@@ -71,7 +85,7 @@ const Claim = () => {
     (async () => {
       try {
         const { RpcProvider } = await import("starknet");
-        const provider = new RpcProvider({ nodeUrl: process.env.NEXT_PUBLIC_SEPOLIA_PROVIDER_URL || "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/_hKu4IgnPgrF8O82GLuYU" });
+        const provider = new RpcProvider({ nodeUrl: getRpcUrl("sepolia") });
         const contract = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddr, providerOrAccount: provider });
         const [claimable, root] = await Promise.all([
           contract.call("is_claimable"),
@@ -116,6 +130,42 @@ const Claim = () => {
     }
   }, [heirCommitments]);
 
+  const handleImportPackage = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const pkg = parseHeirPackage(ev.target?.result as string);
+        setImportedPackage(pkg);
+        setHeirSecret(pkg.secret);
+        setHeirWeight((pkg.weightBps / 100).toString());
+        setHeirCommitments(pkg.commitments.join("\n"));
+        setManualVaultAddr(pkg.vault);
+        setImportError("");
+      } catch (error) {
+        setImportedPackage(null);
+        setImportError(error instanceof Error ? error.message : "Failed to parse file.");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleClearImportedPackage = () => {
+    setImportedPackage(null);
+    setImportError("");
+    setHeirSecret("");
+    setHeirWeight("");
+    setHeirCommitments("");
+    if (!hasVault) {
+      setManualVaultAddr("");
+    }
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
   const handleClaim = async () => {
     if (!heirSecret || !derivedValues || !parsedCommitments?.length || !targetVaultAddr) return;
     setClaimStatus("computing");
@@ -123,6 +173,7 @@ const Claim = () => {
     setStatusDetail("");
     try {
       setClaimStatus("generating");
+      const { generateClaimProof } = await import("~~/utils/starkwill/prover");
       const result = await generateClaimProof(
         derivedValues.secret, derivedValues.weightBps, parsedCommitments, vaultAddrBigInt,
         (detail) => setStatusDetail(detail),
@@ -205,6 +256,35 @@ const Claim = () => {
           </motion.div>
         )}
 
+        {importedVaultDiffersFromConnectedVault && (
+          <motion.div
+            variants={mv(fadeInUp)}
+            initial={shouldReduceMotion ? undefined : "hidden"}
+            animate="visible"
+            className="p-4 bg-amber-500/[0.06] border border-amber-500/15 mb-4"
+          >
+            <p className="text-sm font-medium text-[var(--sw-text)]">Using imported vault instead of connected owner vault</p>
+            <p className="text-[11px] text-[var(--sw-text-tertiary)] mt-1">
+              Connected vault: <span className="font-mono-code">{vaultAddress}</span>
+            </p>
+            <p className="text-[11px] text-[var(--sw-text-tertiary)]">
+              Claiming from: <span className="font-mono-code">{importedPackage?.vault}</span>
+            </p>
+          </motion.div>
+        )}
+
+        {packageCompatibilityError && (
+          <motion.div
+            variants={mv(fadeInUp)}
+            initial={shouldReduceMotion ? undefined : "hidden"}
+            animate="visible"
+            className="p-4 bg-red-500/[0.06] border border-red-500/15 mb-4"
+          >
+            <p className="text-sm font-medium text-red-400">Imported package is stale</p>
+            <p className="text-[11px] text-[var(--sw-text-tertiary)] mt-1">{packageCompatibilityError}</p>
+          </motion.div>
+        )}
+
         {/* ZK Privacy Banner */}
         <motion.div
           variants={mv(fadeInUp)}
@@ -259,7 +339,20 @@ const Claim = () => {
                 </div>
               )}
               <button
-                onClick={() => { setClaimStatus("idle"); setHeirSecret(""); setHeirWeight(""); }}
+                onClick={() => {
+                  setClaimStatus("idle");
+                  setHeirSecret("");
+                  setHeirWeight("");
+                  setHeirCommitments("");
+                  setImportedPackage(null);
+                  setImportError("");
+                  if (!hasVault) {
+                    setManualVaultAddr("");
+                  }
+                  if (fileInputRef.current) {
+                    fileInputRef.current.value = "";
+                  }
+                }}
                 className="px-6 py-2.5 text-sm font-medium border border-emerald-500/15 text-emerald-400 hover:bg-emerald-500/10 transition-all"
               >
                 Done
@@ -273,6 +366,45 @@ const Claim = () => {
               animate="visible"
               className="space-y-5"
             >
+              {/* Import Heir Package */}
+              <motion.div variants={mv(staggerItem)} className="p-6 bg-[var(--sw-surface)] border border-[var(--sw-border)]">
+                <div className="space-y-3">
+                  <h3 className="font-semibold text-base tracking-tight text-[var(--sw-text)]">Import Heir Package</h3>
+                  <p className="text-[11px] text-[var(--sw-text-tertiary)]">
+                    Load your heir credentials file to auto-fill all fields below.
+                  </p>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".json"
+                    onChange={handleImportPackage}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={claimStatus !== "idle"}
+                    className="px-5 py-2.5 text-sm font-medium border border-[var(--sw-border)] text-[var(--sw-text-secondary)] hover:border-emerald-500/30 hover:text-emerald-400 disabled:opacity-40 transition-all flex items-center gap-2"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="17,8 12,3 7,8" />
+                      <line x1="12" y1="3" x2="12" y2="15" />
+                    </svg>
+                    Load .json file
+                  </button>
+                  {importedPackage && (
+                    <button
+                      onClick={handleClearImportedPackage}
+                      disabled={claimStatus !== "idle"}
+                      className="px-5 py-2.5 text-sm font-medium border border-[var(--sw-border)] text-[var(--sw-text-secondary)] hover:border-red-500/30 hover:text-red-400 disabled:opacity-40 transition-all"
+                    >
+                      Clear imported package
+                    </button>
+                  )}
+                  {importError && <p className="text-[11px] text-red-400">{importError}</p>}
+                </div>
+              </motion.div>
+
               {/* Token Selection */}
               <motion.div variants={mv(staggerItem)} className="p-6 bg-[var(--sw-surface)] border border-[var(--sw-border)]">
                 <div className="space-y-4">
@@ -435,7 +567,16 @@ const Claim = () => {
               <motion.div variants={mv(staggerItem)}>
                 <button
                   onClick={handleClaim}
-                  disabled={!heirSecret || !heirWeight || !derivedValues || !parsedCommitments?.length || claimStatus !== "idle" || !isClaimable || !targetVaultAddr}
+                  disabled={
+                    !heirSecret
+                    || !heirWeight
+                    || !derivedValues
+                    || !parsedCommitments?.length
+                    || claimStatus !== "idle"
+                    || !isClaimable
+                    || !targetVaultAddr
+                    || !!packageCompatibilityError
+                  }
                   className="w-full px-7 py-3.5 font-semibold text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 disabled:opacity-30 disabled:pointer-events-none transition-colors"
                 >
                   {status !== "connected" ? (

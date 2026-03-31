@@ -7,6 +7,10 @@ import {
 import * as chains from "@starknet-react/chains";
 import { RpcProvider } from "starknet";
 
+const DEFAULT_DEVNET_RPC_URL = "http://127.0.0.1:5050";
+const DEFAULT_SEPOLIA_RPC_URL = "https://starknet-sepolia.public.blastapi.io/rpc/v0_7";
+const DEFAULT_MAINNET_RPC_URL = "https://starknet-mainnet.public.blastapi.io/rpc/v0_7";
+
 const containsDevnet = (networks: readonly chains.Chain[]) => {
   return (
     networks.filter((it) => it.network == chains.devnet.network).length > 0
@@ -26,20 +30,16 @@ export const getRpcUrl = (networkName: string): string => {
 
   switch (networkName) {
     case "devnet":
-      rpcUrl = devnetRpcUrl || "http://127.0.0.1:5050";
+      rpcUrl = devnetRpcUrl || DEFAULT_DEVNET_RPC_URL;
       break;
     case "sepolia":
-      rpcUrl =
-        sepoliaRpcUrl ||
-        "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/_hKu4IgnPgrF8O82GLuYU";
+      rpcUrl = sepoliaRpcUrl || DEFAULT_SEPOLIA_RPC_URL;
       break;
     case "mainnet":
-      rpcUrl =
-        mainnetRpcUrl ||
-        "https://starknet-mainnet.g.alchemy.com/starknet/version/rpc/v0_10/_hKu4IgnPgrF8O82GLuYU";
+      rpcUrl = mainnetRpcUrl || DEFAULT_MAINNET_RPC_URL;
       break;
     default:
-      rpcUrl = "http://127.0.0.1:5050";
+      rpcUrl = DEFAULT_DEVNET_RPC_URL;
       break;
   }
 

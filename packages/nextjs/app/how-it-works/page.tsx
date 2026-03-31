@@ -292,11 +292,11 @@ const techBreakdown = [
     title: "Noir Circuits",
     subtitle: "The constraint system",
     description:
-      "The heir membership circuit is written in Noir, a Rust-like DSL for zero-knowledge proofs. It takes three private inputs — the heir's secret, Merkle path indices, and path siblings — and three public inputs: the Merkle root, a nullifier hash, and the vault address. The circuit proves that the prover knows a secret whose Blake3 commitment exists in the Merkle tree, without revealing the secret itself.",
+      "The heir membership circuit is written in Noir, a Rust-like DSL for zero-knowledge proofs. It takes four private inputs — the heir's secret, their weight, Merkle path indices, and path siblings — and four public inputs: the Merkle root, a nullifier hash, the vault address, and the public weight. The circuit proves that the prover knows a weighted commitment in the Merkle tree without revealing which heir they are.",
     details: [
       "Hash function: blake3(a || b), first 31 bytes as a BN254 field element",
       "Tree depth: 8 levels, supporting up to 256 heirs per vault",
-      "Commitment: hash2(secret, 0) — a one-way binding to the heir's secret",
+      "Commitment: hash2(secret, weight_bps) — binds the heir secret to a fixed share",
       "Nullifier: hash2(secret, vault_address) — prevents double claims across vaults",
     ],
   },
@@ -321,14 +321,14 @@ const techBreakdown = [
       "Cairo verifier: auto-generated, implements IUltraKeccakZKHonkVerifier",
       "Verification pipeline: Fiat-Shamir transcript → sumcheck → MSM (GLV) → KZG pairing",
       "Pairing: multi_pairing_check_bn254_2P_2F — efficient on-chain BN254 pairing",
-      "Output: public inputs (merkle_root, nullifier_hash, vault_address) if proof is valid",
+      "Output: public inputs (merkle_root, nullifier_hash, vault_address, weight_bps_pub) if proof is valid",
     ],
   },
   {
     title: "Blake3 Merkle Tree",
     subtitle: "Heir commitment scheme",
     description:
-      "Each heir holds a random secret. Their commitment — hash2(secret, 0) using Blake3 — is added to a depth-8 Merkle tree. Only the root is stored on-chain. To claim, an heir proves they know a secret that hashes to a leaf in the tree, without revealing which leaf. The same hash function is mirrored exactly in TypeScript and Noir to ensure consistency.",
+      "Each heir holds a random secret and an assigned weight. Their commitment — hash2(secret, weight_bps) using Blake3 — is added to a depth-8 Merkle tree. Only the root is stored on-chain. To claim, an heir proves they know a secret and weight that hash to a leaf in the tree, without revealing which leaf. The same hash function is mirrored exactly in TypeScript and Noir to ensure consistency.",
     details: [
       "256-leaf fixed-depth tree, padded with zero values",
       "Blake3 chosen for speed in both browser and ZK circuit contexts",
@@ -340,11 +340,11 @@ const techBreakdown = [
     title: "Nullifier System",
     subtitle: "Double-spend prevention",
     description:
-      "When an heir claims, the circuit computes a nullifier as hash2(secret, vault_address). This value is deterministic for each (heir, vault) pair but reveals nothing about the heir's identity. The vault contract stores all spent nullifiers in a Map<felt252, bool> — if the same nullifier appears twice, the transaction reverts.",
+      "When an heir claims, the circuit computes a nullifier as hash2(secret, vault_address). This value is deterministic for each (heir, vault) pair but reveals nothing about the heir's identity. The vault contract stores spent nullifiers per token as Map<(token, nullifier), bool> — if the same heir tries to claim the same token twice, the transaction reverts.",
     details: [
       "Nullifier = hash2(secret, vault_address) — unique per heir per vault",
-      "Stored on-chain in a felt252 → bool mapping",
-      "Prevents the same heir from claiming twice without revealing who they are",
+      "Stored on-chain in a (token, nullifier) → bool mapping",
+      "Prevents the same heir from claiming the same token twice without revealing who they are",
       "Vault-scoped: a proof for vault A cannot be replayed on vault B",
     ],
   },

@@ -8,7 +8,7 @@ import { useTransactor } from "~~/hooks/scaffold-stark";
 import { Contract as StarknetContract } from "starknet";
 import { ArrowPathIcon, CheckCircleIcon, XCircleIcon } from "@heroicons/react/24/outline";
 import { useVault, VAULT_ABI } from "~~/contexts/VaultContext";
-import { useVaultContract } from "~~/hooks/useVaultContract";
+import { getRpcUrl } from "~~/services/web3/provider";
 
 const fadeInUp: Variants = {
   hidden: { opacity: 0, y: 24 },
@@ -32,25 +32,38 @@ const GuardianPage = () => {
   const shouldReduceMotion = useReducedMotion();
   const { writeTransaction } = useTransactor();
   const { vaultAddress, hasVault } = useVault();
-  const vaultContract = useVaultContract();
 
   const [manualVaultAddr, setManualVaultAddr] = useState("");
   const [approvalStatus, setApprovalStatus] = useState<ApprovalStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [isClaimable, setIsClaimable] = useState<boolean | null>(null);
+  const manualVaultLooksValid = manualVaultAddr.startsWith("0x") && manualVaultAddr.length > 10;
 
-  const targetVaultAddr = hasVault ? vaultAddress : (manualVaultAddr.startsWith("0x") && manualVaultAddr.length > 10 ? manualVaultAddr : null);
+  const targetVaultAddr = manualVaultLooksValid ? manualVaultAddr : (hasVault ? vaultAddress : null);
+  const isOverridingConnectedVault = (() => {
+    if (!manualVaultLooksValid || !hasVault || !vaultAddress) return false;
+    try {
+      return BigInt(manualVaultAddr) !== BigInt(vaultAddress);
+    } catch {
+      return false;
+    }
+  })();
+
+  const readClaimableState = async (targetAddr: string): Promise<boolean> => {
+    const { RpcProvider } = await import("starknet");
+    const provider = new RpcProvider({ nodeUrl: getRpcUrl("sepolia") });
+    const contract = new StarknetContract({ abi: VAULT_ABI as any, address: targetAddr, providerOrAccount: provider });
+    const result = await contract.call("is_claimable");
+    return !!result;
+  };
 
   useEffect(() => {
     if (!targetVaultAddr) { setIsClaimable(null); return; }
     let cancelled = false;
     (async () => {
       try {
-        const { RpcProvider } = await import("starknet");
-        const provider = new RpcProvider({ nodeUrl: process.env.NEXT_PUBLIC_SEPOLIA_PROVIDER_URL || "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/_hKu4IgnPgrF8O82GLuYU" });
-        const contract = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddr, providerOrAccount: provider });
-        const result = await contract.call("is_claimable");
-        if (!cancelled) setIsClaimable(!!result);
+        const claimable = await readClaimableState(targetVaultAddr);
+        if (!cancelled) setIsClaimable(claimable);
       } catch {
         if (!cancelled) setIsClaimable(null);
       }
@@ -89,6 +102,7 @@ const GuardianPage = () => {
       const vault = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddr });
       const call = vault.populate("guardian_approve_unlock", []);
       await writeTransaction([call]);
+      setIsClaimable(await readClaimableState(targetVaultAddr));
       setApprovalStatus("success");
     } catch (e: any) {
       console.error("Guardian approval failed:", e);
@@ -124,22 +138,37 @@ const GuardianPage = () => {
         animate="visible"
         className="w-full max-w-xl space-y-5"
       >
-        {/* Vault Address (manual entry for guardians) */}
-        {!hasVault && (
+        {/* Vault Address */}
+        <motion.div
+          variants={mv(staggerItem)}
+          className="p-6 bg-[var(--sw-surface)] border border-[var(--sw-border)]"
+        >
+          <label className="text-xs text-[var(--sw-text-secondary)] block mb-1.5 font-medium">Vault Address</label>
+          <input
+            type="text"
+            value={manualVaultAddr}
+            onChange={(e) => setManualVaultAddr(e.target.value)}
+            placeholder={hasVault ? `Leave blank to use ${vaultAddress?.slice(0, 12)}...${vaultAddress?.slice(-8)}` : "0x... (vault to unlock)"}
+            className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] font-mono-code placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
+          />
+          <p className="text-[11px] text-[var(--sw-text-placeholder)] mt-1.5">
+            {hasVault
+              ? "Paste a different vault address to act as guardian for another vault."
+              : "Enter the address of the vault you are a guardian for."}
+          </p>
+        </motion.div>
+
+        {isOverridingConnectedVault && (
           <motion.div
             variants={mv(staggerItem)}
-            className="p-6 bg-[var(--sw-surface)] border border-[var(--sw-border)]"
+            className="p-4 bg-amber-500/[0.06] border border-amber-500/15"
           >
-            <label className="text-xs text-[var(--sw-text-secondary)] block mb-1.5 font-medium">Vault Address</label>
-            <input
-              type="text"
-              value={manualVaultAddr}
-              onChange={(e) => setManualVaultAddr(e.target.value)}
-              placeholder="0x... (vault to unlock)"
-              className="w-full px-4 py-2.5 bg-[var(--sw-bg-subtle)] border border-[var(--sw-border)] text-sm text-[var(--sw-text)] font-mono-code placeholder:text-[var(--sw-text-placeholder)] focus:outline-none focus:border-emerald-500/40 transition-colors"
-            />
-            <p className="text-[11px] text-[var(--sw-text-placeholder)] mt-1.5">
-              Enter the address of the vault you are a guardian for.
+            <p className="text-sm font-medium text-[var(--sw-text)]">Using manual vault instead of connected owner vault</p>
+            <p className="text-[11px] text-[var(--sw-text-tertiary)] mt-1">
+              Connected vault: <span className="font-mono-code">{vaultAddress}</span>
+            </p>
+            <p className="text-[11px] text-[var(--sw-text-tertiary)]">
+              Acting on: <span className="font-mono-code">{manualVaultAddr}</span>
             </p>
           </motion.div>
         )}

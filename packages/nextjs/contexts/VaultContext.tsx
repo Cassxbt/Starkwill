@@ -3,26 +3,59 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from "react";
 import { useAccount, useProvider } from "@starknet-react/core";
 import { Contract as StarknetContract } from "starknet";
+import scaffoldConfig from "~~/scaffold.config";
 import { VAULT_ABI } from "~~/contracts/vaultAbi";
 
 const LOCALSTORAGE_KEY = "starkwill_vault_address";
+const CACHE_VERSION = 2;
 
-function getCachedVault(walletAddress: string): string | null {
+function getCacheNamespace(factoryAddress?: string): string {
+  return `${scaffoldConfig.targetNetworks[0].network}:${factoryAddress ?? "no-factory"}`;
+}
+
+function readVaultCache(): Record<string, Record<string, string>> {
+  const parsed = JSON.parse(localStorage.getItem(LOCALSTORAGE_KEY) || "{}");
+  if (parsed && typeof parsed === "object" && parsed.version === CACHE_VERSION && parsed.entries) {
+    return parsed.entries as Record<string, Record<string, string>>;
+  }
+  return {};
+}
+
+function writeVaultCache(entries: Record<string, Record<string, string>>) {
+  localStorage.setItem(LOCALSTORAGE_KEY, JSON.stringify({ version: CACHE_VERSION, entries }));
+}
+
+function getCachedVault(walletAddress: string, cacheNamespace: string): string | null {
   if (typeof window === "undefined") return null;
   try {
-    const cache = JSON.parse(localStorage.getItem(LOCALSTORAGE_KEY) || "{}");
-    return cache[walletAddress.toLowerCase()] || null;
+    const cache = readVaultCache();
+    return cache[cacheNamespace]?.[walletAddress.toLowerCase()] || null;
   } catch {
     return null;
   }
 }
 
-function setCachedVault(walletAddress: string, vaultAddress: string) {
+function setCachedVault(walletAddress: string, vaultAddress: string, cacheNamespace: string) {
   if (typeof window === "undefined") return;
   try {
-    const cache = JSON.parse(localStorage.getItem(LOCALSTORAGE_KEY) || "{}");
-    cache[walletAddress.toLowerCase()] = vaultAddress;
-    localStorage.setItem(LOCALSTORAGE_KEY, JSON.stringify(cache));
+    const cache = readVaultCache();
+    const namespaceEntries = cache[cacheNamespace] ?? {};
+    namespaceEntries[walletAddress.toLowerCase()] = vaultAddress;
+    cache[cacheNamespace] = namespaceEntries;
+    writeVaultCache(cache);
+  } catch {}
+}
+
+function clearCachedVault(walletAddress: string, cacheNamespace: string) {
+  if (typeof window === "undefined") return;
+  try {
+    const cache = readVaultCache();
+    if (!cache[cacheNamespace]) return;
+    delete cache[cacheNamespace][walletAddress.toLowerCase()];
+    if (Object.keys(cache[cacheNamespace]).length === 0) {
+      delete cache[cacheNamespace];
+    }
+    writeVaultCache(cache);
   } catch {}
 }
 
@@ -73,13 +106,14 @@ export function VaultProvider({ children, factoryAddress }: VaultProviderProps) 
   const { provider } = useProvider();
   const [vaultAddress, setVaultAddressInternal] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const cacheNamespace = getCacheNamespace(factoryAddress);
 
   const setVaultAddress = useCallback(
     (addr: string) => {
       setVaultAddressInternal(addr);
-      if (address) setCachedVault(address, addr);
+      if (address) setCachedVault(address, addr, cacheNamespace);
     },
-    [address],
+    [address, cacheNamespace],
   );
 
   useEffect(() => {
@@ -88,7 +122,7 @@ export function VaultProvider({ children, factoryAddress }: VaultProviderProps) 
       return;
     }
 
-    const cached = getCachedVault(address);
+    const cached = getCachedVault(address, cacheNamespace);
     if (cached) {
       setVaultAddressInternal(cached);
     }
@@ -105,9 +139,14 @@ export function VaultProvider({ children, factoryAddress }: VaultProviderProps) 
         const addr = typeof result === "bigint" ? "0x" + result.toString(16) : String(result);
         const isZero = /^0x0*$/.test(addr);
 
-        if (!cancelled && !isZero) {
+        if (cancelled) return;
+
+        if (!isZero) {
           setVaultAddressInternal(addr);
-          setCachedVault(address, addr);
+          setCachedVault(address, addr, cacheNamespace);
+        } else {
+          setVaultAddressInternal(null);
+          clearCachedVault(address, cacheNamespace);
         }
       } catch (e) {
         console.error("Factory vault lookup failed:", e);
@@ -119,7 +158,7 @@ export function VaultProvider({ children, factoryAddress }: VaultProviderProps) 
     return () => {
       cancelled = true;
     };
-  }, [address, status, factoryAddress, provider]);
+  }, [address, status, factoryAddress, provider, cacheNamespace]);
 
   return (
     <VaultContext.Provider

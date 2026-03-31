@@ -1,2 +1,3 @@
 secret = "12345"
+weight_bps = "10000"
 vault_address = "42"

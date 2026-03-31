@@ -13,12 +13,10 @@ pub trait IUltraKeccakZKHonkVerifier<TContractState> {
 #[starknet::interface]
 pub trait IVault<TContractState> {
     fn check_in(ref self: TContractState);
-    fn add_heir(ref self: TContractState, heir: ContractAddress);
     fn whitelist_token(ref self: TContractState, token: ContractAddress, allowed: bool);
     fn deposit(ref self: TContractState, token: ContractAddress, amount: u256);
     fn guardian_approve_unlock(ref self: TContractState);
     fn recover(ref self: TContractState, token: ContractAddress, to: ContractAddress, amount: u256);
-    fn claim(ref self: TContractState, token: ContractAddress, to: ContractAddress, amount: u256);
     fn claim_with_proof(
         ref self: TContractState, full_proof_with_hints: Span<felt252>, token: ContractAddress,
     );
@@ -27,7 +25,9 @@ pub trait IVault<TContractState> {
     fn is_claimable(self: @TContractState) -> bool;
     fn get_heir_merkle_root(self: @TContractState) -> felt252;
     fn get_verifier_address(self: @TContractState) -> ContractAddress;
-    fn is_nullifier_used(self: @TContractState, nullifier: felt252) -> bool;
+    fn is_nullifier_used(
+        self: @TContractState, token: ContractAddress, nullifier: felt252,
+    ) -> bool;
 }
 
 #[starknet::contract]
@@ -57,14 +57,12 @@ mod vault {
         guardian_approved: Map<ContractAddress, bool>,
         guardian_approval_count: u32,
 
-        heirs: Map<u32, ContractAddress>,
-        heir_count: u32,
-
         token_whitelist: Map<ContractAddress, bool>,
 
         verifier_address: ContractAddress,
         heir_merkle_root: felt252,
-        nullifiers_used: Map<felt252, bool>,
+        nullifiers_used: Map<(ContractAddress, felt252), bool>,
+        claimable_token_total: Map<ContractAddress, u256>,
     }
 
     #[constructor]
@@ -89,10 +87,14 @@ mod vault {
         self.guardians.entry(0).write(guardian_1);
         self.guardians.entry(1).write(guardian_2);
         self.guardians.entry(2).write(guardian_3);
+        assert(!guardian_1.is_zero(), 'INVALID_GUARDIAN');
+        assert(!guardian_2.is_zero(), 'INVALID_GUARDIAN');
+        assert(!guardian_3.is_zero(), 'INVALID_GUARDIAN');
+        assert(guardian_1 != guardian_2, 'DUP_GUARDIAN');
+        assert(guardian_1 != guardian_3, 'DUP_GUARDIAN');
+        assert(guardian_2 != guardian_3, 'DUP_GUARDIAN');
         self.guardian_count.write(3);
         self.guardian_approval_count.write(0);
-
-        self.heir_count.write(0);
     }
 
     fn assert_only_owner(self: @ContractState) {
@@ -115,14 +117,51 @@ mod vault {
     }
 
     fn assert_claimable(self: @ContractState) {
+        assert(is_claimable_now(self), 'NOT_CLAIMABLE');
+    }
+
+    fn assert_before_claim_phase(self: @ContractState) {
+        assert(!is_claimable_now(self), 'CLAIM_PHASE_STARTED');
+    }
+
+    fn is_claimable_now(self: @ContractState) -> bool {
         if self.is_unlocked.read() {
-            return;
+            return true;
         }
         let now = get_block_timestamp();
         let last = self.last_checkin_ts.read();
         let period = self.checkin_period_secs.read();
         let grace = self.grace_period_secs.read();
-        assert(now > last + period + grace, 'NOT_CLAIMABLE');
+        now > last + period + grace
+    }
+
+    fn reset_guardian_state(ref self: ContractState) {
+        let mut i: u32 = 0;
+        let n = self.guardian_count.read();
+        loop {
+            if i == n {
+                break;
+            }
+            let guardian = self.guardians.entry(i).read();
+            self.guardian_approved.entry(guardian).write(false);
+            i = i + 1;
+        };
+        self.guardian_approval_count.write(0);
+        self.is_unlocked.write(false);
+    }
+
+    fn get_or_init_claimable_total(
+        ref self: ContractState, token: ContractAddress, erc20: IERC20Dispatcher,
+    ) -> u256 {
+        let stored_total = self.claimable_token_total.entry(token).read();
+        if stored_total > 0 {
+            return stored_total;
+        }
+
+        let initial_total = erc20.balance_of(get_contract_address());
+        assert(initial_total > 0, 'ZERO_BALANCE');
+        self.claimable_token_total.entry(token).write(initial_total);
+        initial_total
     }
 
     #[event]
@@ -143,24 +182,21 @@ mod vault {
     impl VaultExternal of super::IVault<ContractState> {
         fn check_in(ref self: ContractState) {
             assert_only_owner(@self);
+            assert_before_claim_phase(@self);
             let now = get_block_timestamp();
             self.last_checkin_ts.write(now);
-        }
-
-        fn add_heir(ref self: ContractState, heir: ContractAddress) {
-            assert_only_owner(@self);
-            let count = self.heir_count.read();
-            self.heirs.entry(count).write(heir);
-            self.heir_count.write(count + 1);
+            reset_guardian_state(ref self);
         }
 
         fn whitelist_token(ref self: ContractState, token: ContractAddress, allowed: bool) {
             assert_only_owner(@self);
+            assert_before_claim_phase(@self);
             self.token_whitelist.entry(token).write(allowed);
         }
 
         fn deposit(ref self: ContractState, token: ContractAddress, amount: u256) {
             assert(self.token_whitelist.entry(token).read(), 'TOKEN_NOT_ALLOWED');
+            assert(!is_claimable_now(@self), 'VAULT_CLAIMABLE');
             let caller = get_caller_address();
             let self_addr = get_contract_address();
             let erc20 = IERC20Dispatcher { contract_address: token };
@@ -185,14 +221,7 @@ mod vault {
             assert_only_owner(@self);
             let now = get_block_timestamp();
             assert(now <= self.cancelable_until_ts.read(), 'CANCEL_WINDOW_OVER');
-            let erc20 = IERC20Dispatcher { contract_address: token };
-            erc20.transfer(to, amount);
-        }
-
-        fn claim(ref self: ContractState, token: ContractAddress, to: ContractAddress, amount: u256) {
-            assert_claimable(@self);
-            let caller = get_caller_address();
-            assert(is_guardian(@self, caller) || caller == self.owner.read(), 'UNAUTHORIZED');
+            assert(!is_claimable_now(@self), 'VAULT_CLAIMABLE');
             let erc20 = IERC20Dispatcher { contract_address: token };
             erc20.transfer(to, amount);
         }
@@ -232,16 +261,17 @@ mod vault {
             let self_felt: felt252 = self_addr.into();
             assert(proof_vault_addr == self_felt, 'VAULT_ADDR_MISMATCH');
 
-            assert(!self.nullifiers_used.entry(nullifier_hash).read(), 'ALREADY_CLAIMED');
-            self.nullifiers_used.entry(nullifier_hash).write(true);
+            let claim_key = (token, nullifier_hash);
+            assert(!self.nullifiers_used.entry(claim_key).read(), 'ALREADY_CLAIMED');
+            self.nullifiers_used.entry(claim_key).write(true);
 
             // Weight is cryptographically bound in the ZK proof (basis points, 1-10000)
             assert(pi_weight > 0, 'ZERO_WEIGHT');
             assert(pi_weight <= 10000, 'WEIGHT_EXCEEDS_MAX');
 
             let erc20 = IERC20Dispatcher { contract_address: token };
-            let balance = erc20.balance_of(get_contract_address());
-            let share = balance * pi_weight / 10000;
+            let claimable_total = get_or_init_claimable_total(ref self, token, erc20);
+            let share = claimable_total * pi_weight / 10000;
             assert(share > 0, 'ZERO_SHARE');
 
             let caller = get_caller_address();
@@ -251,24 +281,19 @@ mod vault {
 
         fn set_verifier_address(ref self: ContractState, verifier: ContractAddress) {
             assert_only_owner(@self);
+            assert_before_claim_phase(@self);
             self.verifier_address.write(verifier);
         }
 
         fn set_heir_merkle_root(ref self: ContractState, root: felt252) {
             assert_only_owner(@self);
+            assert_before_claim_phase(@self);
             assert(root != 0, 'INVALID_MERKLE_ROOT');
             self.heir_merkle_root.write(root);
         }
 
         fn is_claimable(self: @ContractState) -> bool {
-            if self.is_unlocked.read() {
-                return true;
-            }
-            let now = get_block_timestamp();
-            let last = self.last_checkin_ts.read();
-            let period = self.checkin_period_secs.read();
-            let grace = self.grace_period_secs.read();
-            now > last + period + grace
+            is_claimable_now(self)
         }
 
         fn get_heir_merkle_root(self: @ContractState) -> felt252 {
@@ -279,8 +304,8 @@ mod vault {
             self.verifier_address.read()
         }
 
-        fn is_nullifier_used(self: @ContractState, nullifier: felt252) -> bool {
-            self.nullifiers_used.entry(nullifier).read()
+        fn is_nullifier_used(self: @ContractState, token: ContractAddress, nullifier: felt252) -> bool {
+            self.nullifiers_used.entry((token, nullifier)).read()
         }
     }
 }

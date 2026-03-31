@@ -44,15 +44,6 @@ export const VAULT_ABI = [
       },
       {
         type: "function",
-        name: "add_heir",
-        inputs: [
-          { name: "heir", type: "core::starknet::contract_address::ContractAddress" },
-        ],
-        outputs: [],
-        state_mutability: "external",
-      },
-      {
-        type: "function",
         name: "whitelist_token",
         inputs: [
           { name: "token", type: "core::starknet::contract_address::ContractAddress" },
@@ -81,17 +72,6 @@ export const VAULT_ABI = [
       {
         type: "function",
         name: "recover",
-        inputs: [
-          { name: "token", type: "core::starknet::contract_address::ContractAddress" },
-          { name: "to", type: "core::starknet::contract_address::ContractAddress" },
-          { name: "amount", type: "core::integer::u256" },
-        ],
-        outputs: [],
-        state_mutability: "external",
-      },
-      {
-        type: "function",
-        name: "claim",
         inputs: [
           { name: "token", type: "core::starknet::contract_address::ContractAddress" },
           { name: "to", type: "core::starknet::contract_address::ContractAddress" },
@@ -153,6 +133,7 @@ export const VAULT_ABI = [
         type: "function",
         name: "is_nullifier_used",
         inputs: [
+          { name: "token", type: "core::starknet::contract_address::ContractAddress" },
           { name: "nullifier", type: "core::felt252" },
         ],
         outputs: [{ type: "core::bool" }],
