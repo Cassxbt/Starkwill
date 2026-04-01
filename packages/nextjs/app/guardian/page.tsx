@@ -26,17 +26,19 @@ const staggerItem: Variants = {
 };
 
 type ApprovalStatus = "idle" | "submitting" | "success" | "error";
+const GUARDIAN_VAULT_STORAGE_KEY = "starkwill_guardian_vault_address";
 
 const GuardianPage = () => {
   const { address, status } = useAccount();
   const shouldReduceMotion = useReducedMotion();
-  const { writeTransaction } = useTransactor();
+  const { writeTransaction, transactionReceiptInstance } = useTransactor();
   const { vaultAddress, hasVault } = useVault();
 
   const [manualVaultAddr, setManualVaultAddr] = useState("");
   const [approvalStatus, setApprovalStatus] = useState<ApprovalStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [isClaimable, setIsClaimable] = useState<boolean | null>(null);
+  const txReceiptStatus = transactionReceiptInstance.status;
   const manualVaultLooksValid = manualVaultAddr.startsWith("0x") && manualVaultAddr.length > 10;
 
   const targetVaultAddr = manualVaultLooksValid ? manualVaultAddr : (hasVault ? vaultAddress : null);
@@ -58,6 +60,23 @@ const GuardianPage = () => {
   };
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const cachedVault = window.localStorage.getItem(GUARDIAN_VAULT_STORAGE_KEY);
+    if (cachedVault) {
+      setManualVaultAddr(cachedVault);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (manualVaultLooksValid) {
+      window.localStorage.setItem(GUARDIAN_VAULT_STORAGE_KEY, manualVaultAddr);
+    } else {
+      window.localStorage.removeItem(GUARDIAN_VAULT_STORAGE_KEY);
+    }
+  }, [manualVaultAddr, manualVaultLooksValid]);
+
+  useEffect(() => {
     if (!targetVaultAddr) { setIsClaimable(null); return; }
     let cancelled = false;
     (async () => {
@@ -70,6 +89,26 @@ const GuardianPage = () => {
     })();
     return () => { cancelled = true; };
   }, [targetVaultAddr]);
+
+  useEffect(() => {
+    if (txReceiptStatus !== "success" || !targetVaultAddr) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const claimable = await readClaimableState(targetVaultAddr);
+        if (!cancelled) {
+          setIsClaimable(claimable);
+          setApprovalStatus("success");
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setApprovalStatus("error");
+          setErrorMessage(e?.message || "Failed to refresh guardian state.");
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [txReceiptStatus, targetVaultAddr]);
 
   const mv = (v: Variants | undefined) => (shouldReduceMotion ? undefined : v);
 
@@ -102,8 +141,6 @@ const GuardianPage = () => {
       const vault = new StarknetContract({ abi: VAULT_ABI as any, address: targetVaultAddr });
       const call = vault.populate("guardian_approve_unlock", []);
       await writeTransaction([call]);
-      setIsClaimable(await readClaimableState(targetVaultAddr));
-      setApprovalStatus("success");
     } catch (e: any) {
       console.error("Guardian approval failed:", e);
       const msg = e?.message || String(e);
