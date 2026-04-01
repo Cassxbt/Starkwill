@@ -8,7 +8,7 @@ The owner configures a vault with a check-in period, a grace period, a 2-of-3 gu
 
 This repository contains the Cairo contracts, the Noir circuit, the browser-side prover flow, and the Next.js frontend used to configure and claim from the vault.
 
-Live app: [starkwill.vercel.app](https://starkwill.vercel.app)
+Live app: [stark-will.vercel.app](https://starkwill.vercel.app)
 
 ## What the system does
 
