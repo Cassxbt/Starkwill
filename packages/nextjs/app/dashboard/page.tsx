@@ -70,7 +70,7 @@ type CountdownPhase = "active" | "grace" | "claimable" | null;
 const Dashboard = () => {
   const { address, status } = useAccount();
   const shouldReduceMotion = useReducedMotion();
-  const { writeTransaction } = useTransactor();
+  const { writeTransaction, transactionReceiptInstance } = useTransactor();
   const { vaultAddress, hasVault } = useVault();
   const vaultContract = useVaultContract();
 
@@ -96,6 +96,8 @@ const Dashboard = () => {
   const [gracePeriodSecs, setGracePeriodSecs] = useState<number | null>(null);
   const [countdownLabel, setCountdownLabel] = useState<string | null>(null);
   const [countdownPhase, setCountdownPhase] = useState<CountdownPhase>(null);
+  const [vaultBalances, setVaultBalances] = useState<Record<string, string>>({});
+  const txReceiptStatus = transactionReceiptInstance.status;
 
   const refreshVaultState = useCallback(async () => {
     if (!vaultContract) return;
@@ -123,6 +125,32 @@ const Dashboard = () => {
     setGracePeriodSecs(Number(BigInt(graceRaw)));
   }, [vaultAddress, provider]);
 
+  const refreshVaultBalances = useCallback(async () => {
+    if (!vaultAddress || !provider) return;
+    const balances: Record<string, string> = {};
+    await Promise.all(
+      Object.entries(TOKENS).map(async ([symbol, info]) => {
+        try {
+          const res = await (provider as any).callContract({
+            contractAddress: info.sepolia,
+            entrypoint: "balanceOf",
+            calldata: [vaultAddress],
+          });
+          const raw = res.result ?? res;
+          const low = BigInt(raw[0] || "0");
+          const high = BigInt(raw[1] || "0");
+          const balance = low + (high << 128n);
+          if (balance > 0n) {
+            balances[symbol] = formatAmount(balance, info.decimals);
+          }
+        } catch (e) {
+          console.error(`Failed to read ${symbol} balance:`, e);
+        }
+      })
+    );
+    setVaultBalances(balances);
+  }, [vaultAddress, provider]);
+
   useEffect(() => {
     if (!vaultContract) return;
     (async () => {
@@ -144,6 +172,22 @@ const Dashboard = () => {
       }
     })();
   }, [refreshVaultTiming, vaultAddress, provider]);
+
+  useEffect(() => {
+    if (!vaultAddress || !provider) return;
+    refreshVaultBalances();
+  }, [refreshVaultBalances, vaultAddress, provider]);
+
+  useEffect(() => {
+    if (txReceiptStatus !== "success") return;
+    (async () => {
+      try {
+        await Promise.all([refreshVaultState(), refreshVaultTiming(), refreshVaultBalances()]);
+      } catch (e) {
+        console.error("Failed to refresh vault dashboard after transaction:", e);
+      }
+    })();
+  }, [txReceiptStatus, refreshVaultState, refreshVaultTiming, refreshVaultBalances]);
 
   useEffect(() => {
     if (lastCheckinTs == null || checkinPeriodSecs == null || gracePeriodSecs == null) return;
@@ -233,7 +277,6 @@ const Dashboard = () => {
     try {
       const call = new StarknetContract({ abi: VAULT_ABI as any, address: vaultAddress! }).populate("check_in", []);
       await writeTransaction([call]);
-      await Promise.all([refreshVaultState(), refreshVaultTiming()]);
     } catch (e) {
       console.error("Check-in failed:", e);
     } finally {
@@ -365,7 +408,7 @@ const Dashboard = () => {
             </div>
             <button
               onClick={handleCheckIn}
-              disabled={isCheckingIn}
+              disabled={isCheckingIn || !!isClaimable}
               className="inline-flex items-center gap-2 px-6 py-2.5 font-medium text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 disabled:opacity-50 transition-colors"
             >
               {isCheckingIn ? (
@@ -455,6 +498,7 @@ const Dashboard = () => {
             </div>
             <button
               onClick={() => setShowDeposit(!showDeposit)}
+              disabled={!!isClaimable}
               className={`px-4 py-1.5 text-xs font-medium border transition-all duration-300 ${
                 showDeposit
                   ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
@@ -464,6 +508,23 @@ const Dashboard = () => {
               {showDeposit ? "Close" : "Deposit"}
             </button>
           </div>
+
+          {Object.keys(vaultBalances).length > 0 && (
+            <div className="flex flex-wrap gap-3 mb-4">
+              {Object.entries(vaultBalances).map(([symbol, amount]) => (
+                <motion.div
+                  key={`balance-${symbol}-${amount}`}
+                  initial={shouldReduceMotion ? undefined : { scale: 0.8, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ type: "spring", stiffness: 400, damping: 15 }}
+                  className="flex items-center gap-2 px-4 py-2.5 bg-emerald-500/5 border border-emerald-500/15"
+                >
+                  <span className="text-sm font-bold text-emerald-400">{amount}</span>
+                  <span className="text-xs text-[var(--sw-text-tertiary)]">{symbol}</span>
+                </motion.div>
+              ))}
+            </div>
+          )}
 
           <AnimatePresence>
             {showDeposit && (
@@ -560,7 +621,7 @@ const Dashboard = () => {
                   {privateMode ? (
                     <button
                       onClick={handleTongoDeposit}
-                      disabled={tongoStep > 0 || !depositAmount || parseFloat(depositAmount) <= 0 || !tongoKey}
+                      disabled={!!isClaimable || tongoStep > 0 || !depositAmount || parseFloat(depositAmount) <= 0 || !tongoKey}
                       className="px-6 py-2.5 font-medium text-sm bg-purple-500 text-white hover:bg-purple-400 disabled:opacity-40 transition-colors"
                     >
                       {tongoStep > 0 ? (
@@ -572,7 +633,7 @@ const Dashboard = () => {
                   ) : (
                     <button
                       onClick={handleDeposit}
-                      disabled={isDepositing || !depositAmount || parseFloat(depositAmount) <= 0}
+                      disabled={!!isClaimable || isDepositing || !depositAmount || parseFloat(depositAmount) <= 0}
                       className="px-6 py-2.5 font-medium text-sm bg-emerald-500 text-[var(--sw-text-inverted)] hover:bg-emerald-400 disabled:opacity-40 transition-colors"
                     >
                       {isDepositing ? (
@@ -632,7 +693,16 @@ const Dashboard = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {[
               { label: "Configure Vault", href: "/create", icon: "M12 2L2 7l10 5 10-5-10-5z" },
-              { label: "Deposit Assets", href: null, onClick: () => setShowDeposit(true), icon: "M12 2v20M17 7H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" },
+              {
+                label: "Deposit Assets",
+                href: null,
+                onClick: () => {
+                  if (isClaimable) return;
+                  setShowDeposit(true);
+                },
+                disabled: !!isClaimable,
+                icon: "M12 2v20M17 7H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6",
+              },
             ].map((action) => {
               const Wrapper = action.href ? "a" : "button";
               return (
@@ -640,7 +710,12 @@ const Dashboard = () => {
                   key={action.label}
                   {...(action.href ? { href: action.href } : {})}
                   onClick={action.onClick}
-                  className="group flex items-center gap-3 px-4 py-3 border border-[var(--sw-border-light)] bg-[var(--sw-bg-faint)] text-sm text-[var(--sw-text-secondary)] hover:text-emerald-400 hover:border-emerald-500/20 hover:bg-emerald-500/[0.03] transition-all duration-300 text-left"
+                  {...(!action.href ? { disabled: action.disabled } : {})}
+                  className={`group flex items-center gap-3 px-4 py-3 border border-[var(--sw-border-light)] bg-[var(--sw-bg-faint)] text-sm text-[var(--sw-text-secondary)] transition-all duration-300 text-left ${
+                    action.disabled
+                      ? "opacity-40 cursor-not-allowed"
+                      : "hover:text-emerald-400 hover:border-emerald-500/20 hover:bg-emerald-500/[0.03]"
+                  }`}
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-[var(--sw-text-tertiary)] group-hover:text-emerald-400 transition-colors shrink-0">
                     <path d={action.icon} />

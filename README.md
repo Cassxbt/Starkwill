@@ -1,5 +1,7 @@
 # StarkWill
 
+A dead-man's-switch inheritance vault on Starknet where heirs claim with zero-knowledge proofs instead of on-chain identity.
+
 StarkWill is a privacy-preserving inheritance vault on Starknet.
 
 The owner configures a vault with a check-in period, a grace period, a 2-of-3 guardian set, and a private heir set represented by a Merkle root. If the owner keeps checking in, the vault stays locked. If the owner stops checking in for long enough, or guardians unlock it early, heirs can claim with a zero-knowledge proof.
@@ -92,34 +94,34 @@ The contract verifies the proof, checks that the nullifier has not been used for
 
 ### Contracts
 
-- [vault.cairo](/Users/apple/Starknet/starkwill-app/packages/snfoundry/contracts/src/vault.cairo)
+- [vault.cairo](packages/snfoundry/contracts/src/vault.cairo)
   Core inheritance logic: check-in, guardian unlock, token whitelist, claim gating, balance snapshots, proof verification, and payout.
-- [vault_factory.cairo](/Users/apple/Starknet/starkwill-app/packages/snfoundry/contracts/src/vault_factory.cairo)
+- [vault_factory.cairo](packages/snfoundry/contracts/src/vault_factory.cairo)
   Factory deployment path. Enforces one vault per owner.
 
 ### Circuit
 
-- [main.nr](/Users/apple/Starknet/starkwill-app/packages/snfoundry/circuits/heir_membership/src/main.nr)
+- [main.nr](packages/snfoundry/circuits/heir_membership/src/main.nr)
   Noir circuit proving Merkle membership and vault-bound nullifier validity.
 
 ### Frontend
 
-- [create/page.tsx](/Users/apple/Starknet/starkwill-app/packages/nextjs/app/create/page.tsx)
+- [create/page.tsx](packages/nextjs/app/create/page.tsx)
   Vault creation and configuration flow, including package export.
-- [dashboard/page.tsx](/Users/apple/Starknet/starkwill-app/packages/nextjs/app/dashboard/page.tsx)
+- [dashboard/page.tsx](packages/nextjs/app/dashboard/page.tsx)
   Owner dashboard for deposits, check-in, and vault state.
-- [guardian/page.tsx](/Users/apple/Starknet/starkwill-app/packages/nextjs/app/guardian/page.tsx)
+- [guardian/page.tsx](packages/nextjs/app/guardian/page.tsx)
   Guardian approval flow.
-- [claim/page.tsx](/Users/apple/Starknet/starkwill-app/packages/nextjs/app/claim/page.tsx)
+- [claim/page.tsx](packages/nextjs/app/claim/page.tsx)
   Heir import flow, browser proof generation, and claim submission.
 
 ### Shared frontend logic
 
-- [merkle.ts](/Users/apple/Starknet/starkwill-app/packages/nextjs/utils/starkwill/merkle.ts)
+- [merkle.ts](packages/nextjs/utils/starkwill/merkle.ts)
   Hashing, Merkle tree construction, proof generation, and nullifier derivation.
-- [prover.ts](/Users/apple/Starknet/starkwill-app/packages/nextjs/utils/starkwill/prover.ts)
+- [prover.ts](packages/nextjs/utils/starkwill/prover.ts)
   Browser-side Noir execution, Barretenberg proof generation, and Garaga calldata conversion.
-- [heirPackage.ts](/Users/apple/Starknet/starkwill-app/packages/nextjs/utils/starkwill/heirPackage.ts)
+- [heirPackage.ts](packages/nextjs/utils/starkwill/heirPackage.ts)
   Package schema, parsing, normalization, and stale-root checks.
 
 ## Current contract properties

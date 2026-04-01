@@ -568,7 +568,9 @@ const Claim = () => {
                 <button
                   onClick={handleClaim}
                   disabled={
-                    !heirSecret
+                    status !== "connected"
+                    || !address
+                    || !heirSecret
                     || !heirWeight
                     || !derivedValues
                     || !parsedCommitments?.length
