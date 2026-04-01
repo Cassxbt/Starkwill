@@ -129,7 +129,7 @@ export async function generateClaimProof(
   const execResult = await noir.execute(circuitInputs);
 
   onStatus?.("Generating ZK proof (this may take a moment)...");
-  const backend = new UltraHonkBackend(circuit.bytecode, { threads: navigator.hardwareConcurrency || 4 });
+  const backend = new UltraHonkBackend(circuit.bytecode);
   const proofResult = await backend.generateProof(execResult.witness, { keccakZK: true });
   backend.destroy();
 
